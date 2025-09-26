@@ -38,7 +38,7 @@ base class PermissionsService implements Permissions {
 
   /// Creates a [PermissionsService] appropriate for this platform
   factory PermissionsService.instance() {
-    return Platform.isAndroid
+    return Platform.isAndroid || Platform.isOhos
         ? AndroidPermissionsService()
         : Platform.isIOS
             ? IOSPermissionsService()

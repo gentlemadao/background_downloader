@@ -2,7 +2,7 @@ name: background_downloader
 description: A multi-platform background file downloader and uploader. Define the task, enqueue and monitor progress
 
 version: 9.2.5
-repository: https://github.com/781flyingdutchman/background_downloader
+publish_to: 'none'
 
 environment:
   sdk: ^3.5.0
@@ -13,7 +13,16 @@ dependencies:
     sdk: flutter
   logging: ^1.0.2
   http: ^1.1.0
-  path_provider: ^2.0.2
+  path_provider:
+    git:
+      url: https://gitcode.com/openharmony-tpc/flutter_packages.git
+      ref: 'br_path_provider-v2.1.5_ohos'
+      path: "packages/path_provider/path_provider"
+  path_provider_ohos:
+    git:
+      url: https://gitcode.com/openharmony-tpc/flutter_packages.git
+      ref: 'br_path_provider-v2.1.5_ohos'
+      path: "packages/path_provider/path_provider_ohos"
   path: ^1.8.1
   async: ^2.6.0
   mime: ^2.0.0
@@ -41,4 +50,6 @@ flutter:
         package: com.bbflight.background_downloader
         pluginClass: BDPlugin
       ios:
+        pluginClass: BackgroundDownloaderPlugin
+      ohos:
         pluginClass: BackgroundDownloaderPlugin

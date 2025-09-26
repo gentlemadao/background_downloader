@@ -1,0 +1,10 @@
+{
+  "module": {
+    "name": "background_downloader",
+    "type": "har",
+    "deviceTypes": [
+      "default",
+      "tablet"
+    ]
+  }
+}

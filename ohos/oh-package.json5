@@ -1,0 +1,9 @@
+{
+  "name": "background_downloader",
+  "version": "1.0.0",
+  "description": "Background_downloader for ohos.",
+  "main": "index.ets",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}

@@ -114,7 +114,7 @@ abstract base class BaseDownloader {
 
   factory BaseDownloader.instance(
       PersistentStorage persistentStorage, Database database) {
-    final instance = Platform.isAndroid
+    final instance = Platform.isAndroid || Platform.isOhos
         ? AndroidDownloader()
         : Platform.isIOS
             ? IOSDownloader()
