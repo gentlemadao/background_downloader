@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "background_downloader_example"
+    },
+    {
+      "name": "media_write_reason",
+      "value": "需要权限保存文件"
     }
   ]
 }

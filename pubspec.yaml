@@ -52,4 +52,4 @@ flutter:
       ios:
         pluginClass: BackgroundDownloaderPlugin
       ohos:
-        pluginClass: BackgroundDownloaderPlugin
+        pluginClass: BDPlugin

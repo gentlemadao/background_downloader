@@ -144,19 +144,20 @@ abstract base class NativeDownloader extends BaseDownloader {
         case (
             'progressUpdate',
             [
-              double progress,
-              int expectedFileSize,
-              double networkSpeed,
-              int timeRemaining
+              num progress,
+              num expectedFileSize,
+              num networkSpeed,
+              num timeRemaining
             ]
           ):
           if (task.group != BaseDownloader.chunkGroup) {
+            debugPrint("progressUpdate: $progress $expectedFileSize $networkSpeed $timeRemaining");
             processProgressUpdate(TaskProgressUpdate(
                 task,
-                progress,
-                expectedFileSize,
-                networkSpeed,
-                Duration(milliseconds: timeRemaining)));
+                progress.toDouble(),
+                expectedFileSize.toInt(),
+                networkSpeed.toDouble(),
+                Duration(milliseconds: timeRemaining.toInt())));
           } else {
             // this is a chunk task, so pass parent taskId,
             // chunk taskId and progress to native

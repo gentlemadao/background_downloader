@@ -5,6 +5,12 @@
     "deviceTypes": [
       "default",
       "tablet"
+    ],
+    "metadata": [
+      {
+        "name": "UseTsHar",
+        "value": "true"
+      },
     ]
   }
 }

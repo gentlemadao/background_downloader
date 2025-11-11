@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:background_downloader/background_downloader.dart';
 import 'package:background_downloader_example/isolate.dart';
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:logging/logging.dart';
 
 void main() {
@@ -131,7 +132,7 @@ class _MyAppState extends State<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    final onMobile = Platform.isAndroid || Platform.isIOS;
+    final onMobile = Platform.isAndroid || Platform.isIOS || Platform.isOhos;
     return MaterialApp(
       theme: ThemeData(
         useMaterial3: true,
@@ -149,120 +150,131 @@ class _MyAppState extends State<MyApp> {
           body: Center(
               child: Padding(
             padding: const EdgeInsets.all(16.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Text('RequireWiFi setting',
-                          style: Theme.of(context).textTheme.titleLarge),
-                      const RequireWiFiChoice(),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    children: [
-                      Expanded(
-                          child: Text('Force error',
-                              style: Theme.of(context).textTheme.titleLarge)),
-                      Switch(
-                          value: downloadWithError,
-                          onChanged: (value) {
-                            setState(() {
-                              downloadWithError = value;
-                            });
-                          })
-                    ],
-                  ),
-                ),
-                Center(
-                    child: ElevatedButton(
-                  onPressed: processButtonPress,
-                  child: Text(
-                    buttonTexts[buttonState.index],
-                  ),
-                )),
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Row(
-                    children: [
-                      const Expanded(child: Text('File download status:')),
-                      Text('${downloadTaskStatus ?? "undefined"}')
-                    ],
-                  ),
-                ),
-                const Divider(
-                  height: 30,
-                  thickness: 5,
-                  color: Colors.blueGrey,
-                ),
-                Center(
-                    child: ElevatedButton(
-                        onPressed:
-                            loadAndOpenInProgress ? null : processLoadAndOpen,
-                        child: Text(
-                          Platform.isIOS
-                              ? 'Load, open and add'
-                              : Platform.isAndroid
-                                  ? 'Load, open and move'
-                                  : 'Load & Open',
-                        ))),
-                Center(
-                    child: Text(
-                  loadAndOpenInProgress ? 'Busy' : '',
-                )),
-                const Divider(
-                  height: 30,
-                  thickness: 5,
-                  color: Colors.blueGrey,
-                ),
-                Center(
-                    child: ElevatedButton(
-                        onPressed:
-                            loadABunchInProgress ? null : processLoadABunch,
-                        child: const Text('Load a bunch'))),
-                Center(child: Text(loadABunchInProgress ? 'Enqueueing' : '')),
-                const Divider(
-                  height: 30,
-                  thickness: 5,
-                  color: Colors.blueGrey,
-                ),
-                Center(
-                  child: ElevatedButton(
-                    onPressed:
-                        loadBackgroundInProgress ? null : processLoadBackground,
-                    child: const Text(
-                      'Load in background',
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Text('RequireWiFi setting',
+                            style: Theme.of(context).textTheme.titleLarge),
+                        const RequireWiFiChoice(),
+                      ],
                     ),
                   ),
-                ),
-                Center(
-                  child: Text(
-                    loadBackgroundInProgress
-                        ? 'Working...'
-                        : loadBackgroundResult ?? '',
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                            child: Text('Force error',
+                                style: Theme.of(context).textTheme.titleLarge)),
+                        Switch(
+                            value: downloadWithError,
+                            onChanged: (value) {
+                              setState(() {
+                                downloadWithError = value;
+                              });
+                            })
+                      ],
+                    ),
                   ),
-                ),
-                if (onMobile)
+                  Center(
+                      child: ElevatedButton(
+                    onPressed: processButtonPress,
+                    child: Text(
+                      buttonTexts[buttonState.index],
+                    ),
+                  )),
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Row(
+                      children: [
+                        const Expanded(child: Text('File download status:')),
+                        Text('${downloadTaskStatus ?? "undefined"}')
+                      ],
+                    ),
+                  ),
                   const Divider(
                     height: 30,
                     thickness: 5,
                     color: Colors.blueGrey,
                   ),
-                if (onMobile)
+                  Center(
+                      child: ElevatedButton(
+                          onPressed:
+                              loadAndOpenInProgress ? null : processLoadAndOpen,
+                          child: Text(
+                            Platform.isIOS
+                                ? 'Load, open and add'
+                                : Platform.isAndroid
+                                    ? 'Load, open and move'
+                                    : 'Load & Open',
+                          ))),
+                  Center(
+                      child: Text(
+                    loadAndOpenInProgress ? 'Busy' : '',
+                  )),
+                  const Divider(
+                    height: 30,
+                    thickness: 5,
+                    color: Colors.blueGrey,
+                  ),
+                  Center(
+                      child: ElevatedButton(
+                          onPressed:
+                              loadABunchInProgress ? null : processLoadABunch,
+                          child: const Text('Load a bunch'))),
+                  Center(child: Text(loadABunchInProgress ? 'Enqueueing' : '')),
+                  const Divider(
+                    height: 30,
+                    thickness: 5,
+                    color: Colors.blueGrey,
+                  ),
                   Center(
                     child: ElevatedButton(
-                      onPressed: processPickDirectory,
+                      onPressed: loadBackgroundInProgress
+                          ? null
+                          : processLoadBackground,
                       child: const Text(
-                        'Pick destination',
+                        'Load in background',
                       ),
                     ),
                   ),
-              ],
+                  Center(
+                    child: Text(
+                      loadBackgroundInProgress
+                          ? 'Working...'
+                          : loadBackgroundResult ?? '',
+                    ),
+                  ),
+                  Center(
+                    child: ElevatedButton(
+                      onPressed: uploadWithUrl,
+                      child: const Text(
+                        'upload',
+                      ),
+                    ),
+                  ),
+                  if (onMobile)
+                    const Divider(
+                      height: 30,
+                      thickness: 5,
+                      color: Colors.blueGrey,
+                    ),
+                  if (onMobile)
+                    Center(
+                      child: ElevatedButton(
+                        onPressed: processPickDirectory,
+                        child: const Text(
+                          'Pick destination',
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
           )),
           bottomSheet: DownloadProgressIndicator(progressUpdateStream.stream,
@@ -283,12 +295,15 @@ class _MyAppState extends State<MyApp> {
         backgroundDownloadTask = DownloadTask(
             url: downloadWithError
                 ? 'https://avmaps-dot-bbflightserver-hrd.appspot.com/public/get_current_app_data' // returns 403 status code
-                : 'https://storage.googleapis.com/approachcharts/test/5MB-test.ZIP',
-            filename: 'zipfile.zip',
+                : 'http://117.72.15.104:8088/api/public/dl/pGQRHjQ0',
+            // : "http://117.72.15.104:8088/api/public/dl/S-nnDfNO",
+            // : "http://117.72.15.104:8088/api/public/dl/PnSxvZf7", //876k
+            // : "http://117.72.15.104:8088/api/public/dl/6PHzKAc7", //1.23m
+            filename: '77FBD75118F.mov',
             directory: 'my/directory',
             baseDirectory: BaseDirectory.applicationDocuments,
             updates: Updates.statusAndProgress,
-            retries: 3,
+            // retries: 1,
             allowPause: true,
             metaData: '<example metaData>',
             displayName: 'My display name');
@@ -321,6 +336,18 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  Future<void> uploadWithUrl() async {
+    var result = await FilePicker.platform.pickFiles();
+    if (result != null) {
+      File file = File(result.files.single.path!);
+      UploadTask uploadTask = UploadTask.fromFile(
+          file: file,
+          url: "http://117.72.15.104/upload",
+          updates: Updates.statusAndProgress);
+      FileDownloader().enqueue(uploadTask);
+    }
+  }
+
   /// Process 'Load & Open' button
   ///
   /// Loads a JPG of a dog and launches viewer using [openFile]
@@ -328,8 +355,7 @@ class _MyAppState extends State<MyApp> {
     if (!loadAndOpenInProgress) {
       await getPermission(PermissionType.notifications);
       var task = DownloadTask(
-          url:
-              'https://i2.wp.com/www.skiptomylou.org/wp-content/uploads/2019/06/dog-drawing.jpg',
+          url: 'http://117.72.15.104:8088/api/public/dl/S-nnDfNO',
           baseDirectory: BaseDirectory.applicationSupport,
           filename: 'dog.jpg');
       setState(() {
@@ -365,6 +391,27 @@ class _MyAppState extends State<MyApp> {
         }
       }
       if (Platform.isAndroid) {
+        // on Android we move, not add, so we first wat for the
+        // openFile method to complete
+        await Future.delayed(const Duration(seconds: 3));
+        var auth = await FileDownloader()
+            .permissions
+            .status(PermissionType.androidSharedStorage);
+        if (auth != PermissionStatus.granted) {
+          auth = await FileDownloader()
+              .permissions
+              .request(PermissionType.androidSharedStorage);
+        }
+        if (auth == PermissionStatus.granted) {
+          final path = await FileDownloader()
+              .moveToSharedStorage(task, SharedStorage.images);
+          debugPrint(
+              'Android path to dog picture in .images = ${path ?? "permission denied"}');
+        } else {
+          debugPrint('androidSharedStorage permission not granted');
+        }
+      }
+      if (Platform.isOhos) {
         // on Android we move, not add, so we first wat for the
         // openFile method to complete
         await Future.delayed(const Duration(seconds: 3));

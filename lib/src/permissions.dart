@@ -38,14 +38,16 @@ base class PermissionsService implements Permissions {
 
   /// Creates a [PermissionsService] appropriate for this platform
   factory PermissionsService.instance() {
-    return Platform.isAndroid || Platform.isOhos
+    return Platform.isAndroid
         ? AndroidPermissionsService()
-        : Platform.isIOS
-            ? IOSPermissionsService()
-            : Platform.isLinux || Platform.isMacOS || Platform.isWindows
-                ? PermissionsService()
-                : throw ArgumentError(
-                    '${Platform.operatingSystem} is not a supported platform');
+        : Platform.isOhos
+            ? OhosPermissionsService()
+            : Platform.isIOS
+                ? IOSPermissionsService()
+                : Platform.isLinux || Platform.isMacOS || Platform.isWindows
+                    ? PermissionsService()
+                    : throw ArgumentError(
+                        '${Platform.operatingSystem} is not a supported platform');
   }
 
   @override
@@ -84,6 +86,40 @@ final class IOSPermissionsService extends PermissionsService {
     return result != null
         ? PermissionStatus.values[result]
         : PermissionStatus.requestError;
+  }
+}
+
+final class OhosPermissionsService extends IOSPermissionsService {
+  Completer<PermissionStatus>? permissionStatusCompleter;
+
+  @override
+  Future<PermissionStatus> request(PermissionType permissionType) async {
+    if (![PermissionType.notifications, PermissionType.androidSharedStorage]
+        .contains(permissionType)) {
+      return PermissionStatus.granted;
+    }
+    if (permissionStatusCompleter != null) {
+      log.warning(
+          'Permission request already in progress - failing this one immediately');
+      return PermissionStatus.requestError;
+    }
+    permissionStatusCompleter = Completer();
+    final waitForCompletion = await NativeDownloader.methodChannel
+        .invokeMethod<bool>('requestPermission', permissionType.index);
+    if (waitForCompletion == true) {
+      return permissionStatusCompleter!.future;
+    } else {
+      log.warning(
+          'Failure to request for permission - was it already granted?');
+      permissionStatusCompleter = null;
+      return PermissionStatus.requestError;
+    }
+  }
+
+  @override
+  void onPermissionRequestResult(PermissionStatus permissionStatus) {
+    permissionStatusCompleter?.complete(permissionStatus);
+    permissionStatusCompleter = null;
   }
 }
 
