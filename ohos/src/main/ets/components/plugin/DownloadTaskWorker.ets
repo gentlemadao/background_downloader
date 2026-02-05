@@ -9,13 +9,13 @@ import {
 } from './Models';
 import { TaskWorker } from './TaskWorker';
 import { common } from '@kit.AbilityKit';
-import fs from '@ohos.file.fs';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import BDPlugin from './BDPlugin';
-import Want from '@ohos.app.ability.Want';
+import { Want } from '@kit.AbilityKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { NotificationService } from './Notifications';
-import dataPreferences from '@ohos.data.preferences';
+import { preferences } from '@kit.ArkData';
 
 export class DownloadTaskWorker extends TaskWorker {
   private eTagHeader: string | undefined;
@@ -30,63 +30,77 @@ export class DownloadTaskWorker extends TaskWorker {
   }
 
   override async doWork(): Promise<void> {
-    this.startTimeout();
-    const options: dataPreferences.Options = { name: 'DEFAULT' };
-    this.prefs = await dataPreferences.getPreferences(this.applicationContext, options);
-    console.log(`has prefs1  ${this.prefs ? "true" : " false"}`);
-    const params = new TaskWantParams(this.want.parameters);
-    console.log(params.keyTask);
-    this.task = Task.fromObject(JSON.parse(params.keyTask));
-    this.notificationConfigJsonString = params.keyNotificationConfig;
-    if (this.notificationConfigJsonString) {
-      this.notificationConfig = NotificationConfig.fromObject(JSON.parse(this.notificationConfigJsonString));
-    }
-    this.isResume = this.determineIfResume();
+    try {
+      this.startTimeout();
+      const options: preferences.Options = { name: 'DEFAULT' };
+      this.prefs = await preferences.getPreferences(this.applicationContext, options);
+      console.info(DownloadTaskWorker.TAG, `has prefs1  ${this.prefs ? "true" : " false"}`);
+      const params = new TaskWantParams(this.want.parameters);
+      console.info(DownloadTaskWorker.TAG, params.keyTask);
+      this.task = Task.fromObject(JSON.parse(params.keyTask) as ESObject);
+      this.notificationConfigJsonString = params.keyNotificationConfig;
+      if (this.notificationConfigJsonString) {
+        this.notificationConfig = NotificationConfig.fromObject(JSON.parse(this.notificationConfigJsonString) as ESObject);
+      }
+      this.isResume = this.determineIfResume();
 
 
-    console.info(DownloadTaskWorker.TAG,
-      `${this.isResume ? 'Resuming' : 'Starting'} task with taskId ${this.task.taskId}`);
-    await TaskWorker.processStatusUpdate(this.task, TaskStatus.RUNNING, this.prefs);
-    if (!this.isResume) {
-      await TaskWorker.processProgressUpdate(this.task, 0.0, this.prefs);
-    }
-    NotificationService.updateNotification(this, TaskStatus.RUNNING);
+      console.info(DownloadTaskWorker.TAG,
+        `${this.isResume ? 'Resuming' : 'Starting'} task with taskId ${this.task?.taskId}`);
+      if (this.task) {
+        await TaskWorker.processStatusUpdate(this.task, TaskStatus.RUNNING, this.prefs);
+        if (!this.isResume) {
+          await TaskWorker.processProgressUpdate(this.task, 0.0, this.prefs);
+        }
+      }
+      NotificationService.updateNotification(this, TaskStatus.RUNNING);
 
-    const status = await this.doTaskInternal();
+      const status = await this.doTaskInternal();
 
-    await TaskWorker.processStatusUpdate(
-      this.task,
-      status,
-      this.prefs,
-      this.taskException,
-      this.responseBody,
-      undefined, // responseHeaders
-      this.responseStatusCode,
-      undefined, // mimeType
-      undefined, // charSet
-      this.applicationContext
-    );
-    if (status !== TaskStatus.FAILED || this.task.retriesRemaining === 0) {
-      NotificationService.updateNotification(this, status);
+      if (this.task) {
+        await TaskWorker.processStatusUpdate(
+          this.task,
+          status,
+          this.prefs,
+          this.taskException,
+          this.responseBody,
+          undefined, // responseHeaders
+          this.responseStatusCode,
+          undefined, // mimeType
+          undefined, // charSet
+          this.applicationContext
+        );
+        if (status !== TaskStatus.FAILED || this.task.retriesRemaining === 0) {
+          NotificationService.updateNotification(this, status);
+        }
+        if (status !== TaskStatus.CANCELED) {
+          BDPlugin.holdingQueue?.taskFinished(this.task);
+        }
+      }
+    } catch (e) {
+      const error = e as BusinessError;
+      console.error(DownloadTaskWorker.TAG, `Fatal error in doWork: ${error.message}`);
+    } finally {
+      this.hasDeliveredResult = true;
     }
-    if (status !== TaskStatus.CANCELED) {
-      BDPlugin.holdingQueue?.taskFinished(this.task);
-    }
-    this.hasDeliveredResult = true;
   }
 
   private async doTaskInternal(): Promise<TaskStatus> {
+    const task = this.task;
+    if (!task) {
+      return TaskStatus.FAILED;
+    }
     try {
-      const url = this.task.url;
+      const url = task.url;
 
       const headers: rcp.RequestHeaders = {} as rcp.RequestHeaders;
 
-      for (const entry of this.task.headers.entries()) {
+      for (const entry of task.headers.entries()) {
         headers[entry[0]] = entry[1];
       }
 
       if (this.isResume) {
-        const taskRangeHeader = this.task.headers.get('Range') ?? '';
+        const taskRangeHeader = task.headers.get('Range') ?? '';
         // Implement range parsing
         // For now, assume the whole file is requested
         this.taskRangeStartByte = 0;
@@ -96,13 +110,13 @@ export class DownloadTaskWorker extends TaskWorker {
 
       const tempDir = this.applicationContext.cacheDir;
       this.tempFilePath = `${tempDir}/com.bbflight.background_downloader${Math.random()}`;
-      console.log(DownloadTaskWorker.TAG, `filepath ${this.tempFilePath}`);
+      console.info(DownloadTaskWorker.TAG, `filepath ${this.tempFilePath}`);
 
 
       const session = rcp.createSession();
 
       try {
-        console.log(DownloadTaskWorker.TAG, `Going to request ${url}`);
+        console.info(DownloadTaskWorker.TAG, `Going to request ${url}`);
 
         let downloadToFile: rcp.DownloadToFile = {
           kind: 'file',
@@ -116,18 +130,18 @@ export class DownloadTaskWorker extends TaskWorker {
               tracing: {
                 httpEventsHandler: {
                   onHeaderReceive: (resp) => {
-                    console.log(DownloadTaskWorker.TAG, `response receive ${resp['content-length']}`);
+                    console.info(DownloadTaskWorker.TAG, `response receive ${resp['content-length']}`);
                   },
                   onDownloadProgress: (totalSize: number, transferredSize: number) => {
-                    console.log(DownloadTaskWorker.TAG,
+                    console.info(DownloadTaskWorker.TAG,
                       `response totalSize ${totalSize} transferredSize ${transferredSize}`);
-                    if (this.prefs) {
+                    if (this.prefs && task) {
                       const progress =
                         totalSize > 0 ? Math.min(1.0, (transferredSize) / (totalSize)) :
                           -1.0;
                       if (this.shouldSendProgressUpdate(progress, Date.now())) {
-                        console.log(DownloadTaskWorker.TAG, `progress ${progress}`);
-                        TaskWorker.processProgressUpdate(this.task, progress, this.prefs, totalSize);
+                        console.info(DownloadTaskWorker.TAG, `progress ${progress}`);
+                        TaskWorker.processProgressUpdate(task, progress, this.prefs, totalSize);
                       }
                     }
                   }
@@ -141,32 +155,36 @@ export class DownloadTaskWorker extends TaskWorker {
         } as rcp.DownloadToFile
 
         const resp = await session.downloadToFile(url, downloadToFile);
-        console.log(DownloadTaskWorker.TAG, `request response ${url}`);
+        console.info(DownloadTaskWorker.TAG, `request response ${url}`);
 
         return await this.process(resp);
 
       } catch (e) {
         console.error(`err: err code is ${e.code}, err message is ${JSON.stringify(e)}`);
-        console.error(DownloadTaskWorker.TAG, `Error for session ${this.task.taskId}: ${e.message}`);
+        console.error(DownloadTaskWorker.TAG, `Error for session ${task.taskId}: ${e.message}`);
       } finally {
         session.close();
       }
     } catch (e) {
       const error = e as BusinessError;
-      console.error(DownloadTaskWorker.TAG, `Error for taskId ${this.task.taskId}: ${error.message}`);
+      console.error(DownloadTaskWorker.TAG, `Error for taskId ${task.taskId}: ${error.message}`);
       this.setTaskException(error);
     }
     return TaskStatus.FAILED;
   }
 
   private async process(response: rcp.Response): Promise<TaskStatus> {
+    const task = this.task;
+    if (!task) {
+      return TaskStatus.FAILED;
+    }
     this.responseStatusCode = response.statusCode;
     if (response.statusCode >= 200 && response.statusCode <= 206) {
-      console.log(DownloadTaskWorker.TAG, 'handle res');
+      console.info(DownloadTaskWorker.TAG, 'handle res');
       this.eTagHeader = response.headers['ETag'] as string;
       const acceptRangesHeader = response.headers['Accept-Ranges'] as string;
       this.serverAcceptsRanges = acceptRangesHeader === 'bytes' || response.statusCode === 206;
-      if (this.task.allowPause) {
+      if (task.allowPause) {
         this.taskCanResume = this.serverAcceptsRanges;
         // processCanResume(this.task, this.taskCanResume);
       }
@@ -188,13 +206,13 @@ export class DownloadTaskWorker extends TaskWorker {
         return TaskStatus.FAILED;
       }
 
-      const destFilePath = this.task.filePath(this.applicationContext);
-      if (!this.task.filename) {
+      const destFilePath = task.filePath(this.applicationContext);
+      if (!task.filename) {
         // Suggest filename
       }
 
       const contentLength = parseInt(response.headers['content-length'] as string ?? '-1');
-      console.log(DownloadTaskWorker.TAG, `contentLength ${contentLength}`);
+      console.info(DownloadTaskWorker.TAG, `contentLength ${contentLength}`);
 
       try {
         // This part needs to be adapted to handle streaming the download
@@ -208,16 +226,16 @@ export class DownloadTaskWorker extends TaskWorker {
           fs.closeSync(destFile);
           this.deleteTempFile();
 
-          console.info(DownloadTaskWorker.TAG, `Successfully downloaded taskId ${this.task.taskId} to ${destFilePath}`);
+          console.info(DownloadTaskWorker.TAG, `Successfully downloaded taskId ${task.taskId} to ${destFilePath}`);
           return TaskStatus.COMPLETE;
         }
         if (transferResult === TaskStatus.PAUSED && this.prefs) {
-          BDPlugin.pausedTaskIds.delete(this.task.taskId);
+          BDPlugin.pausedTaskIds.delete(task.taskId);
           if (this.taskCanResume) {
-            console.info(DownloadTaskWorker.TAG, `Task ${this.task.taskId} paused`);
+            console.info(DownloadTaskWorker.TAG, `Task ${task.taskId} paused`);
             await TaskWorker.processResumeData(
               new ResumeData({
-                task: this.task,
+                task: task,
                 data: this.tempFilePath,
                 requiredStartByte: this.bytesTotal + this.startByte,
                 eTag: this.eTagHeader
@@ -231,12 +249,12 @@ export class DownloadTaskWorker extends TaskWorker {
 
       } catch (e) {
         const error = e as BusinessError;
-        console.log(DownloadTaskWorker.TAG, e);
+        console.error(DownloadTaskWorker.TAG, e);
         this.taskException = new TaskException(ExceptionType.FILESYSTEM, error.code, error.message);
         return TaskStatus.FAILED;
       }
     } else {
-      console.info(DownloadTaskWorker.TAG, `Response code ${response.statusCode} for taskId ${this.task.taskId}`);
+      console.info(DownloadTaskWorker.TAG, `Response code ${response.statusCode} for taskId ${task.taskId}`);
       this.taskException = new TaskException(
         ExceptionType.HTTP_RESPONSE,
         response.statusCode, response.request.url.toString(),
@@ -259,6 +277,10 @@ export class DownloadTaskWorker extends TaskWorker {
   }
 
   private async transferBytes(outputQueue: rcp.INetworkOutputQueue, contentLength: number): Promise<TaskStatus> {
+    const task = this.task;
+    if (!task) {
+      return TaskStatus.FAILED;
+    }
     try {
       const file = fs.openSync(this.tempFilePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
       if (this.isResume) {
@@ -268,13 +290,13 @@ export class DownloadTaskWorker extends TaskWorker {
       let offset = 0;
       while (offset < contentLength) {
         if (this.isCancelled) {
-          console.info(DownloadTaskWorker.TAG, `Task ${this.task.taskId} cancelled`);
+          console.info(DownloadTaskWorker.TAG, `Task ${task.taskId} cancelled`);
           fs.closeSync(file);
           this.deleteTempFile();
           return TaskStatus.CANCELED;
         }
         if (this.isTimedOut) {
-          console.warn(DownloadTaskWorker.TAG, `Task ${this.task.taskId} timed out`);
+          console.warn(DownloadTaskWorker.TAG, `Task ${task.taskId} timed out`);
           fs.closeSync(file);
           this.deleteTempFile();
           this.taskException = new TaskException(ExceptionType.GENERAL, undefined, 'Task timed out');
@@ -284,22 +306,22 @@ export class DownloadTaskWorker extends TaskWorker {
         fs.writeSync(file.fd, chunk);
         offset += chunk.byteLength;
         this.bytesTotal = offset;
-        console.log(DownloadTaskWorker.TAG, `chunk ${chunk.byteLength}`);
+        console.info(DownloadTaskWorker.TAG, `chunk ${chunk.byteLength}`);
 
         if (this.prefs) {
           const progress =
             contentLength > 0 ? Math.min(1.0, (this.startByte + this.bytesTotal) / (this.startByte + contentLength)) :
               -1.0;
-          console.log(DownloadTaskWorker.TAG, `progress ${progress}`);
+          console.info(DownloadTaskWorker.TAG, `progress ${progress}`);
           if (this.shouldSendProgressUpdate(progress, Date.now())) {
-            await TaskWorker.processProgressUpdate(this.task, progress, this.prefs, contentLength);
+            await TaskWorker.processProgressUpdate(task, progress, this.prefs, contentLength);
           }
         }
       }
 
       fs.closeSync(file);
       if (this.prefs) {
-        await TaskWorker.processProgressUpdate(this.task, 1.0, this.prefs, contentLength);
+        await TaskWorker.processProgressUpdate(task, 1.0, this.prefs, contentLength);
       }
       return TaskStatus.COMPLETE;
     } catch (e) {

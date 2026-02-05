@@ -3,7 +3,7 @@ import { DownloadTaskWorker } from './DownloadTaskWorker';
 import { UploadTaskWorker } from './UploadTaskWorker';
 import { ParallelDownloadTaskWorker } from './ParallelDownloadTaskWorker';
 import { common } from '@kit.AbilityKit';
-import Want from '@ohos.app.ability.Want';
+import { Want } from '@kit.AbilityKit';
 import { TaskWorker } from './TaskWorker';
 import BDPlugin from './BDPlugin';
 
@@ -46,7 +46,7 @@ class TransferManager {
     try {
       await worker.doWork();
     } catch (e) {
-      console.error("TransferManager", "Error doWork", e)
+      console.error(TAG, "Error doWork", e)
     }finally {
       this.activeTasks.delete(task.taskId);
       console.info(TAG, `Finished task with id ${task.taskId}. Total active tasks: ${this.activeTasks.size}`);

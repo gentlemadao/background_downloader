@@ -1,7 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { collections, lang, uri } from '@kit.ArkTS';
 import { Auth } from './Auth';
-import fs from '@ohos.file.fs';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { PostArg, PostArgValue } from './QueueService';
 
 export enum TaskWorkerKey {
@@ -92,15 +92,15 @@ export class TaskOptions {
   }
 
   hasBeforeStartCallback(): boolean {
-    return this.beforeTaskStartRawHandle != null;
+    return this.beforeTaskStartRawHandle !== null;
   }
 
   hasOnStartCallback(): boolean {
-    return this.onTaskStartRawHandle != null;
+    return this.onTaskStartRawHandle !== null;
   }
 
   hasOnFinishCallback(): boolean {
-    return this.onTaskFinishedRawHandle != null;
+    return this.onTaskFinishedRawHandle !== null;
   }
 }
 
@@ -294,7 +294,7 @@ export class Task {
     try {
       return new uri.URI(this.url).host ?? '';
     } catch (e) {
-      console.error('Models: get host error', e);
+      console.error('Models', 'get host error', e);
       return '';
     }
   }
@@ -321,11 +321,11 @@ export class Task {
       return '';
     }
     const filenameToUse = withFilename ?? this.filename;
-    console.log('baseDirectory', this.baseDirectory.toJSON());
+    console.info('Models', 'baseDirectory', this.baseDirectory.toJSON());
     const baseDirPath = this.baseDirPath(context, this.baseDirectory);
-    console.log('baseDirPath', baseDirPath);
-    console.log('baseDirPath length', baseDirPath.length);
-    if (baseDirPath == null) {
+    console.info('Models', 'baseDirPath', baseDirPath);
+    console.info('Models', 'baseDirPath length', baseDirPath.length);
+    if (baseDirPath === null) {
       throw new Error('Base directory is not available');
     }
     if (this.directory) {
@@ -333,12 +333,12 @@ export class Task {
       try {
         if (!fs.accessSync(targetDir)) {
           fs.mkdirSync(targetDir, true);
-          console.log('Directory created successfully:', targetDir);
+          console.info('Models', 'Directory created successfully:', targetDir);
         } else {
-          console.log('The directory already exists');
+          console.info('Models', 'The directory already exists');
         }
       } catch (error) {
-        console.error('Failed to create directory:', error.code, error.message);
+        console.error('Models', 'Failed to create directory:', error.code, error.message);
       }
     }
     return this.directory ? `${baseDirPath}/${this.directory}/${filenameToUse}` : `${baseDirPath}/${filenameToUse}`;

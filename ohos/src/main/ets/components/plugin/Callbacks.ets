@@ -12,13 +12,13 @@ export interface Deferred<T> {
 }
 
 export function createDeferred<T>(): Deferred<T> {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: string) => void;
+  let resolveFunc: (value: T | PromiseLike<T>) => void = () => {};
+  let rejectFunc: (reason?: string) => void = () => {};
   const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
+    resolveFunc = res;
+    rejectFunc = rej;
   });
-  return { promise, resolve, reject };
+  return { promise, resolve: resolveFunc, reject: rejectFunc };
 }
 
 function FlutterResultHandlerArkTS(completer: Deferred<string | undefined>): MethodResult {
@@ -27,7 +27,7 @@ function FlutterResultHandlerArkTS(completer: Deferred<string | undefined>): Met
     success: (result?: Object) => {
       try {
         // If a JSON string is returned, it can be resolved directly
-        completer.resolve(result != undefined ? result as string : undefined);
+        completer.resolve(result !== undefined ? result as string : undefined);
       } catch (e) {
         // Prevent duplicate resolve errors
         console.error("resolve error:", e);
@@ -75,7 +75,7 @@ export class Callbacks {
    */
   private static async getMethodChannel(context: common.UIAbilityContext): Promise<MethodChannel | undefined> {
     const result = await Callbacks.methodChannelMutex.lockAsync<MethodChannel | undefined>(async () => {
-      if (Callbacks.callbackMethodChannel == undefined) {
+      if (Callbacks.callbackMethodChannel === undefined) {
         let methodChannelCompleter = createDeferred<MethodChannel | undefined>();
         new Promise<void>((resolve, reject) => {
           try {
@@ -83,7 +83,7 @@ export class Callbacks {
             let prefs = preferences.getPreferencesSync(context, options);
             let rawHandle =
               prefs.getSync(BDPlugin.KEY_CALLBACK_DISPATCHER_RAW_HANDLE, -1) as number;
-            if (rawHandle == -1) {
+            if (rawHandle === -1) {
               console.warn(
                 Callbacks.TAG,
                 "getMethodChannel without registered callbackDispatcherRawHandle"
@@ -94,7 +94,7 @@ export class Callbacks {
             let flutterEngine = new FlutterEngine(context, null, null, null)
             let callbackDispatcherCallback = FlutterCallbackInformation.lookupCallbackInformation(rawHandle);
 
-            if (callbackDispatcherCallback == null) {
+            if (callbackDispatcherCallback === null) {
               console.warn(
                 Callbacks.TAG,
                 "invokeOnStartCallback failed to find callbackDispatcher"
@@ -131,13 +131,13 @@ export class Callbacks {
     statusUpdate?: TaskStatusUpdate,
   ): Promise<Task | TaskStatusUpdate | undefined> {
     let methodChannel = await Callbacks.getMethodChannel(context);
-    if (methodChannel == undefined) {
+    if (methodChannel === undefined) {
       return;
     }
     return Callbacks.methodChannelMutex.lockAsync<ESObject>(async () => {
       let resultingObjectAsJsonStringCompleter = createDeferred<string | undefined>();
       new Promise<void>((_resolve) => {
-        let arg = task != undefined ? JSON.stringify(task) : JSON.stringify(statusUpdate);
+        let arg = task !== undefined ? JSON.stringify(task) : JSON.stringify(statusUpdate);
         console.info(Callbacks.TAG, "Invoking" + methodName + " for taskId " + task?.taskId);
         methodChannel!.invokeMethod(
           methodName,
@@ -148,9 +148,9 @@ export class Callbacks {
       });
 
       let objectAsJsonString = await resultingObjectAsJsonStringCompleter.promise;
-      return (objectAsJsonString == undefined) ? undefined :
-        (methodName == "beforeTaskStartCallback" ? TaskStatusUpdate.fromObject(JSON.parse(objectAsJsonString)) :
-        Task.fromObject(JSON.parse(objectAsJsonString)))
+      return (objectAsJsonString === undefined) ? undefined :
+        (methodName == "beforeTaskStartCallback" ? TaskStatusUpdate.fromObject(JSON.parse(objectAsJsonString) as ESObject) :
+        Task.fromObject(JSON.parse(objectAsJsonString) as ESObject))
 
     });
 

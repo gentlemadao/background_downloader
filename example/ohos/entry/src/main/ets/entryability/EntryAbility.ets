@@ -1,10 +1,12 @@
 import { FlutterAbility, FlutterEngine } from '@ohos/flutter_ohos';
 import { GeneratedPluginRegistrant } from '../plugins/GeneratedPluginRegistrant';
-import commonEventManager from '@ohos.commonEventManager';
+import { commonEventManager } from '@kit.BasicServicesKit';
 import BDPlugin from 'background_downloader/src/main/ets/components/plugin/BDPlugin';
 import { AbilityConstant, Want } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 
 export default class EntryAbility extends FlutterAbility {
+  static readonly TAG = 'EntryAbility';
   subscriber: commonEventManager.CommonEventSubscriber | undefined;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {
@@ -21,7 +23,7 @@ export default class EntryAbility extends FlutterAbility {
     super.onDestroy();
     if (this.subscriber) {
       commonEventManager.unsubscribe(this.subscriber, () => {
-        console.info("Unsubscribed common event");
+        console.info(EntryAbility.TAG, "Unsubscribed common event");
       });
     }
   }
@@ -32,12 +34,12 @@ export default class EntryAbility extends FlutterAbility {
     };
     commonEventManager.createSubscriber(subscribeInfo).then((subscriber) => {
       this.subscriber = subscriber;
-      commonEventManager.subscribe(this.subscriber, (err, data) => {
+      commonEventManager.subscribe(this.subscriber, (err: BusinessError, data: commonEventManager.CommonEventData) => {
         if (err) {
-          console.error(`Failed to subscribe common event. Code is ${err.code}, message is ${err.message}`);
+          console.error(EntryAbility.TAG, `Failed to subscribe common event. Code is ${err.code}, message is ${err.message}`);
           return;
         }
-        console.info(`Received common event: ${data.event}`);
+        console.info(EntryAbility.TAG, `Received common event: ${data.event}`);
         if (data.parameters) {
           const taskId = data.parameters.taskId as string;
           if (data.event === "com.bbflight.background_downloader.pause") {

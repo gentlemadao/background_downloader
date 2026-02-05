@@ -17,9 +17,9 @@ import { EnqueueItem } from './HoldingQueue';
 import { WiFi } from './WIFI';
 import { BackgroundPost, PostArg, QueueService } from './QueueService';
 import { BusinessError, systemDateTime } from '@kit.BasicServicesKit';
-import Want from '@ohos.app.ability.Want';
+import { Want } from '@kit.AbilityKit';
 import { collections } from '@kit.ArkTS';
-import dataPreferences from '@ohos.data.preferences';
+import { preferences } from '@kit.ArkData';
 
 // Define explicit type for task key-value pairs
 type TaskKeyValuePair = [string, Task];
@@ -34,7 +34,7 @@ export class TaskWorker {
   static readonly KEY_ETAG = 'eTag'
   static readonly BUFFER_SIZE = 2 << 12;
   static readonly TASK_TIMEOUT_MILLIS = 9 * 60 * 1000; // 9 minutes
-  task!: Task;
+  task: Task | undefined = undefined;
   // properties related to pause/resume functionality and progress
   startByte = 0 // actual starting position within the task range, used for resume
   bytesTotal = 0 // total bytes read in this download session
@@ -75,7 +75,7 @@ export class TaskWorker {
     this.isCancelled = true;
   }
 
-  prefs?: dataPreferences.Preferences
+  prefs?: preferences.Preferences
   applicationContext: common.UIAbilityContext
   want: Want
 
@@ -88,7 +88,7 @@ export class TaskWorker {
     // to be implemented by subclasses
   }
 
-  public getTask(): Task {
+  public getTask(): Task | undefined {
     return this.task;
   }
 
@@ -158,7 +158,7 @@ export class TaskWorker {
   public static async processStatusUpdate(
     task: Task,
     status: TaskStatus,
-    prefs: dataPreferences.Preferences,
+    prefs: preferences.Preferences,
     taskException?: TaskException,
     responseBody?: string,
     responseHeaders?: Map<string, string>,
@@ -196,7 +196,7 @@ export class TaskWorker {
     // A 'failed' progress update is only provided if
     // a retry is not needed: if it is needed, a `waitingToRetry` progress update
     // will be generated on the Dart side
-    const retryNeeded = modifiedStatus == TaskStatus.FAILED && task.retriesRemaining > 0
+    const retryNeeded = modifiedStatus === TaskStatus.FAILED && task.retriesRemaining > 0
     let canSendStatusUpdate = true // may become false for cancellations
     // if task is in final state, process a final progressUpdate
     switch (modifiedStatus) {
@@ -293,7 +293,7 @@ export class TaskWorker {
       });
 
       QueueService.cleanupTaskId(task.taskId);
-      if (task.options?.hasOnFinishCallback() == true && context) {
+      if (task.options?.hasOnFinishCallback() === true && context) {
         Callbacks.invokeOnTaskFinishedCallback(context, taskStatusUpdate);
       }
     }
@@ -321,7 +321,7 @@ export class TaskWorker {
    * Sends progress update via the background channel to Flutter, if requested
    */
   public static async processProgressUpdate(
-    task: Task, progress: number, prefs: dataPreferences.Preferences, expectedFileSize: number = -1,
+    task: Task, progress: number, prefs: preferences.Preferences, expectedFileSize: number = -1,
     downloadSpeed: number = -1.0, timeRemaining: number = -1000
   ) {
     if (task.providesProgressUpdates()) {
@@ -356,7 +356,7 @@ export class TaskWorker {
    *
    * Also stores a copy in memory locally, to allow notifications to resume a task
    */
-  public static async processResumeData(resumeData: ResumeData, prefs: dataPreferences.Preferences) {
+  public static async processResumeData(resumeData: ResumeData, prefs: preferences.Preferences) {
     BDPlugin.localResumeData.set(resumeData.task.taskId, resumeData);
     try {
       await TaskWorker.postOnBackgroundChannel(
@@ -384,13 +384,13 @@ export class TaskWorker {
     prefsKey: string,
     taskId: string,
     item: string,
-    prefs: dataPreferences.Preferences
+    prefs: preferences.Preferences
   ): Promise<void> {
     await BDPlugin.prefsLock.lockAsync(async () => {
       const jsonString = await prefs.get(prefsKey, "{}") as string;
       let mapByTaskId: Record<string, string>;
       try {
-        mapByTaskId = JSON.parse(jsonString);
+        mapByTaskId = JSON.parse(jsonString) as Record<string, string>;
       } catch (e) {
         mapByTaskId = {};
       }
@@ -402,12 +402,12 @@ export class TaskWorker {
 }
 
 /** Return the map of tasks stored in preferences */
-export async function getTaskMap(prefs: dataPreferences.Preferences): Promise<Map<string, Task>> {
+export async function getTaskMap(prefs: preferences.Preferences): Promise<Map<string, Task>> {
   return await BDPlugin.prefsLock.lockAsync(async () => {
     const tasksMapJson = await prefs.get(BDPlugin.KEY_TASKS_MAP, "[]") as string;
     try {
       // The map is stored as an array of [key, value] pairs
-      const taskArray: Array<[string, object]> = JSON.parse(tasksMapJson);
+      const taskArray: Array<[string, object]> = JSON.parse(tasksMapJson) as Array<[string, object]>;
       const resultMap = new Map<string, Task>();
       for (let i = 0; i < taskArray.length; i++) {
         const pair = taskArray[i];

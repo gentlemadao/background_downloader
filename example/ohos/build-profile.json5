@@ -7,11 +7,11 @@
         "material": {
           "certpath": "/Users/unilumin/.ohos/config/default_ohos_MSV3A4k4GSdbBwWXTnUrPkZaPY-GK1oocm__RIzxe-4=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B1815466C6641246224D3CB507EB706FD531E6F169A4C7E5462ADB3922611FE1A2BBD7A2BA38CA4",
+          "keyPassword": "0000001B34395975C43310A0885B6203088C21F54BF83E67D40C3DB7EFDB88B4F5F7368A1ACDFB53CF20ED",
           "profile": "/Users/unilumin/.ohos/config/default_ohos_MSV3A4k4GSdbBwWXTnUrPkZaPY-GK1oocm__RIzxe-4=.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "/Users/unilumin/.ohos/config/default_ohos_MSV3A4k4GSdbBwWXTnUrPkZaPY-GK1oocm__RIzxe-4=.p12",
-          "storePassword": "0000001B84470BD82051B46CD77C2EC5BDD123E841DEBB3EB0C0E66D8EFC89440946A185464B88360AC150"
+          "storePassword": "0000001B0238E53BCD320FEE7FDCCFE9FB50AF51399FBD528F62D80FFBEADD07E2D27F873AAD5834F3BE5B"
         }
       }
     ],
@@ -20,7 +20,8 @@
         "name": "default",
         "signingConfig": "default",
         "compatibleSdkVersion": "5.1.0(18)",
-        "runtimeOS": "HarmonyOS"
+        "runtimeOS": "HarmonyOS",
+        "targetSdkVersion": "5.1.0(18)"
       }
     ],
     "buildModeSet": [

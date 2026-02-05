@@ -43,7 +43,13 @@ export class Auth {
   }
 
   addOrUpdateQueryParams(url: string, queryParams: collections.Map<string, string> = new collections.Map()): uri.URI {
-    const startUri = new uri.URI(url);
+    let startUri: uri.URI;
+    try {
+      startUri = new uri.URI(url);
+    } catch (e) {
+      console.error('Auth', 'Invalid URL in addOrUpdateQueryParams', url);
+      return new uri.URI('');
+    }
     if (queryParams.size === 0) {
       return startUri;
     }
@@ -84,7 +90,7 @@ export class Auth {
 
   isTokenExpired(bufferTime: number = 10000): boolean {
     const expiry = this.accessTokenExpiryTime;
-    if (expiry == null) {
+    if (expiry === null || expiry === undefined) {
       return false;
     }
     const expiryTimeWithBuffer = Date.now() + bufferTime;
@@ -107,6 +113,6 @@ export class Auth {
   }
 
   hasOnAuthCallback(): boolean {
-    return this.onAuthRawHandle != null;
+    return this.onAuthRawHandle !== null;
   }
 }

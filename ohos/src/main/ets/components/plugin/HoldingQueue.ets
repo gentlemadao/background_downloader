@@ -39,39 +39,44 @@ export class HoldingQueue {
    */
   private async startQueueProcessor() {
     while (true) {
-      this.processSignal = createDeferred<void>();
-      await this.processSignal.promise; // Wait for a signal
-      this.processSignal = null;
+      try {
+        this.processSignal = createDeferred<void>();
+        await this.processSignal.promise; // Wait for a signal
+        this.processSignal = null;
 
-      await this.stateMutex.lockAsync(async () => {
-        if (this.concurrent < this.maxConcurrent) {
-          const mustWait: EnqueueItem[] = [];
-          let processed = false;
-          // Find the first item that can be enqueued
-          while (this.queue.length > 0 && !processed) {
-            const item = this.queue.shift()!; // Highest priority item
-            const host = item.task.host();
-            const group = item.task.group;
+        await this.stateMutex.lockAsync(async () => {
+          if (this.concurrent < this.maxConcurrent) {
+            const mustWait: EnqueueItem[] = [];
+            let processed = false;
+            // Find the first item that can be enqueued
+            while (this.queue.length > 0 && !processed) {
+              const item = this.queue.shift()!; // Highest priority item
+              const host = item.task.host();
+              const group = item.task.group;
 
-            if ((this.concurrentByHost.get(host) ?? 0) < this.maxConcurrentByHost &&
-              (this.concurrentByGroup.get(group) ?? 0) < this.maxConcurrentByGroup) {
-              // Enqueue this item
-              this.concurrent++;
-              this.concurrentByHost.set(host, (this.concurrentByHost.get(host) ?? 0) + 1);
-              this.concurrentByGroup.set(group, (this.concurrentByGroup.get(group) ?? 0) + 1);
-              item.enqueue(0);
-              processed = true; // Process only one item per signal
-            } else {
-              mustWait.push(item);
+              if ((this.concurrentByHost.get(host) ?? 0) < this.maxConcurrentByHost &&
+                (this.concurrentByGroup.get(group) ?? 0) < this.maxConcurrentByGroup) {
+                // Enqueue this item
+                this.concurrent++;
+                this.concurrentByHost.set(host, (this.concurrentByHost.get(host) ?? 0) + 1);
+                this.concurrentByGroup.set(group, (this.concurrentByGroup.get(group) ?? 0) + 1);
+                item.enqueue(0);
+                processed = true; // Process only one item per signal
+              } else {
+                mustWait.push(item);
+              }
+            }
+            // Add items that must wait back to the queue and re-sort
+            if (mustWait.length > 0) {
+              this.queue.unshift(...mustWait);
+              this.queue.sort((a, b) => a.compareTo(b));
             }
           }
-          // Add items that must wait back to the queue and re-sort
-          if (mustWait.length > 0) {
-            this.queue.unshift(...mustWait);
-            this.queue.sort((a, b) => a.compareTo(b));
-          }
-        }
-      });
+        });
+      } catch (e) {
+        const error = e as BusinessError;
+        console.error(BDPlugin.TAG, `Error in startQueueProcessor: ${error.message}`);
+      }
     }
   }
 
@@ -80,11 +85,16 @@ export class HoldingQueue {
    */
   private async startTaskFinishedProcessor() {
     while (true) {
-      if (this.taskFinishedQueue.length > 0) {
-        const task = this.taskFinishedQueue.shift()!;
-        await this.executeTaskFinished(task);
-      } else {
-        await sleep(50); // Wait if the queue is empty
+      try {
+        if (this.taskFinishedQueue.length > 0) {
+          const task = this.taskFinishedQueue.shift()!;
+          await this.executeTaskFinished(task);
+        } else {
+          await sleep(50); // Wait if the queue is empty
+        }
+      } catch (e) {
+        const error = e as BusinessError;
+        console.error(BDPlugin.TAG, `Error in startTaskFinishedProcessor: ${error.message}`);
       }
     }
   }
@@ -144,7 +154,7 @@ export class HoldingQueue {
       for (const item of toRemove) {
         await TaskWorker.processStatusUpdate(item.task, TaskStatus.CANCELED, prefs, undefined, undefined, undefined,
           undefined, undefined, undefined, context);
-        console.log(BDPlugin.TAG, `Canceled task with id ${item.task.taskId}`);
+        console.info(BDPlugin.TAG, `Canceled task with id ${item.task.taskId}`);
         removedTaskIds.push(item.task.taskId);
       }
     });

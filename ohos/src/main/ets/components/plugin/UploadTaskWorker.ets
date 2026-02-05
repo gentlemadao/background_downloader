@@ -1,14 +1,14 @@
 import { Task, TaskStatus, ExceptionType, TaskException, TaskWantParams } from './Models';
 import { TaskWorker } from './TaskWorker';
 import { common } from '@kit.AbilityKit';
-import fs from '@ohos.file.fs';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import BDPlugin from './BDPlugin';
-import Want from '@ohos.app.ability.Want';
+import { Want } from '@kit.AbilityKit';
 import { NotificationService } from './Notifications';
-import dataPreferences from '@ohos.data.preferences';
+import { preferences } from '@kit.ArkData';
 import { rcp } from '@kit.RemoteCommunicationKit';
-import util from '@ohos.util';
+import { util } from '@kit.ArkTS';
 
 interface FileField {
   fileField: string;
@@ -25,45 +25,59 @@ export class UploadTaskWorker extends TaskWorker {
   }
 
   override async doWork(): Promise<void> {
-    this.startTimeout();
-    const options: dataPreferences.Options = { name: 'DEFAULT' };
-    this.prefs = await dataPreferences.getPreferences(this.applicationContext, options);
-    const params = new TaskWantParams(this.want.parameters as Record<string, Object>);
-    this.task = Task.fromObject(JSON.parse(params.keyTask));
-    this.notificationConfigJsonString = params.keyNotificationConfig;
+    try {
+      this.startTimeout();
+      const options: preferences.Options = { name: 'DEFAULT' };
+      this.prefs = await preferences.getPreferences(this.applicationContext, options);
+      const params = new TaskWantParams(this.want.parameters as Record<string, Object>);
+      this.task = Task.fromObject(JSON.parse(params.keyTask) as ESObject);
+      this.notificationConfigJsonString = params.keyNotificationConfig;
 
-    console.info(UploadTaskWorker.TAG, `Starting upload task with taskId ${this.task.taskId}`);
-    await TaskWorker.processStatusUpdate(this.task, TaskStatus.RUNNING, this.prefs);
-    await TaskWorker.processProgressUpdate(this.task, 0.0, this.prefs);
-    NotificationService.updateNotification(this, TaskStatus.RUNNING);
+      console.info(UploadTaskWorker.TAG, `Starting upload task with taskId ${this.task?.taskId}`);
+      if (this.task) {
+        await TaskWorker.processStatusUpdate(this.task, TaskStatus.RUNNING, this.prefs);
+        await TaskWorker.processProgressUpdate(this.task, 0.0, this.prefs);
+      }
+      NotificationService.updateNotification(this, TaskStatus.RUNNING);
 
-    const status = await this.doTaskInternal();
+      const status = await this.doTaskInternal();
 
-    await TaskWorker.processStatusUpdate(
-      this.task,
-      status,
-      this.prefs,
-      this.taskException,
-      this.responseBody,
-      this.responseHeaders,
-      this.responseStatusCode,
-      undefined, // mimeType
-      undefined, // charSet
-      this.applicationContext
-    );
-    if (status !== TaskStatus.FAILED || this.task.retriesRemaining === 0) {
-      NotificationService.updateNotification(this, status);
+      if (this.task) {
+        await TaskWorker.processStatusUpdate(
+          this.task,
+          status,
+          this.prefs,
+          this.taskException,
+          this.responseBody,
+          this.responseHeaders,
+          this.responseStatusCode,
+          undefined, // mimeType
+          undefined, // charSet
+          this.applicationContext
+        );
+        if (status !== TaskStatus.FAILED || this.task.retriesRemaining === 0) {
+          NotificationService.updateNotification(this, status);
+        }
+        if (status !== TaskStatus.CANCELED) {
+          BDPlugin.holdingQueue?.taskFinished(this.task);
+        }
+      }
+    } catch (e) {
+      const error = e as BusinessError;
+      console.error(UploadTaskWorker.TAG, `Fatal error in doWork: ${error.message}`);
+    } finally {
+      this.hasDeliveredResult = true;
     }
-    if (status !== TaskStatus.CANCELED) {
-      BDPlugin.holdingQueue?.taskFinished(this.task);
-    }
-    this.hasDeliveredResult = true;
   }
 
   private async doTaskInternal(): Promise<TaskStatus> {
+    const task = this.task;
+    if (!task) {
+      return TaskStatus.FAILED;
+    }
     try {
-      console.log(this.task.post);
-      if (this.task.post?.toLowerCase() === 'binary') {
+      console.info(UploadTaskWorker.TAG, task.post);
+      if (task.post?.toLowerCase() === 'binary') {
         return await this.processBinaryUpload();
       } else {
         return await this.processMultipartUpload();
@@ -71,13 +85,17 @@ export class UploadTaskWorker extends TaskWorker {
     } catch (e) {
       const error = e as BusinessError;
       this.setTaskException(error);
-      console.error(UploadTaskWorker.TAG, `Error for taskId ${this.task.taskId}: ${error.message}`);
+      console.error(UploadTaskWorker.TAG, `Error for taskId ${task.taskId}: ${error.message}`);
       return TaskStatus.FAILED;
     }
   }
 
   private async processBinaryUpload(): Promise<TaskStatus> {
-    const filePath = this.task.filePath(this.applicationContext);
+    const task = this.task;
+    if (!task) {
+      return TaskStatus.FAILED;
+    }
+    const filePath = task.filePath(this.applicationContext);
     const networkInputQueue = new rcp.NetworkInputQueue();
 
     // Producer: Reads the file and writes it to the queue
@@ -102,7 +120,7 @@ export class UploadTaskWorker extends TaskWorker {
               stat.size > 0 ? Math.min(1.0, (this.startByte + bytesRead) / (this.startByte + stat.size)) :
                 -1.0;
             if (this.shouldSendProgressUpdate(progress, Date.now())) {
-              await TaskWorker.processProgressUpdate(this.task, progress, this.prefs, stat.size);
+              await TaskWorker.processProgressUpdate(task, progress, this.prefs, stat.size);
             }
           }
         } else {
@@ -123,20 +141,20 @@ export class UploadTaskWorker extends TaskWorker {
 
     // Consumer: The rcp engine reads from the queue and uploads
 
-    const url = this.task.url;
+    const url = task.url;
     const stat = fs.statSync(filePath);
     const fileSize = stat.size;
 
     const headers: rcp.RequestHeaders = {} as rcp.RequestHeaders;
-    for (const entry of this.task.headers.entries()) {
+    for (const entry of task.headers.entries()) {
       headers[entry[0]] = entry[1];
     }
     headers['Content-Length'] = fileSize.toString();
     const taskContentDisposition =
-      this.task.headers.get('Content-Disposition') ?? this.task.headers.get('content-disposition');
+      task.headers.get('Content-Disposition') ?? task.headers.get('content-disposition');
     if (taskContentDisposition !== "") {
       headers['Content-Disposition'] =
-        taskContentDisposition ?? `attachment; filename="${encodeURI(this.task.filename)}"`;
+        taskContentDisposition ?? `attachment; filename="${encodeURI(task.filename)}"`;
     }
 
     const session = rcp.createSession({
@@ -148,7 +166,7 @@ export class UploadTaskWorker extends TaskWorker {
     } catch (e) {
       const error = e as BusinessError;
       this.setTaskException(error);
-      console.error(UploadTaskWorker.TAG, `Upload error for taskId ${this.task.taskId}: ${error.message}`);
+      console.error(UploadTaskWorker.TAG, `Upload error for taskId ${task.taskId}: ${error.message}`);
       return TaskStatus.FAILED;
     } finally {
       session.close();
@@ -156,8 +174,12 @@ export class UploadTaskWorker extends TaskWorker {
   }
 
   private async processMultipartUpload(): Promise<TaskStatus> {
+    const task = this.task;
+    if (!task) {
+      return TaskStatus.FAILED;
+    }
     const networkInputQueue = new rcp.NetworkInputQueue();
-    const url = this.task.url;
+    const url = task.url;
     const boundary = UploadTaskWorker.boundary;
     const lineFeed = UploadTaskWorker.lineFeed;
 
@@ -173,7 +195,7 @@ export class UploadTaskWorker extends TaskWorker {
     // Fields
     const fieldParts: ArrayBuffer[] = [];
     let fieldsSize = 0;
-    for (const entry of this.task.fields.entries()) {
+    for (const entry of task.fields.entries()) {
       const part = this.stringToArrayBuffer(this.fieldEntry(entry[0], entry[1]));
       fieldParts.push(part);
       fieldsSize += part.byteLength;
@@ -181,10 +203,10 @@ export class UploadTaskWorker extends TaskWorker {
 
     // Files
     const filesData: FileField[] = [];
-    if (this.task.isMultiUploadTask()) {
-      const fileFields = JSON.parse(this.task.fileField) as string[];
-      const filenames = JSON.parse(this.task.filename) as string[];
-      const mimeTypes = JSON.parse(this.task.mimeType) as string[];
+    if (task.isMultiUploadTask()) {
+      const fileFields = JSON.parse(task.fileField) as string[];
+      const filenames = JSON.parse(task.filename) as string[];
+      const mimeTypes = JSON.parse(task.mimeType) as string[];
       for (let i = 0; i < filenames.length; i++) {
         filesData.push({
           fileField: fileFields[i],
@@ -194,9 +216,9 @@ export class UploadTaskWorker extends TaskWorker {
       }
     } else {
       filesData.push({
-        fileField: this.task.fileField,
-        filename: this.task.filename,
-        mimeType: this.task.mimeType
+        fileField: task.fileField,
+        filename: task.filename,
+        mimeType: task.mimeType
       });
     }
 
@@ -204,7 +226,7 @@ export class UploadTaskWorker extends TaskWorker {
     const fileSizes: number[] = [];
     let filesContentSize = 0;
     for (const fileData of filesData) {
-      const filePath = this.task.filePath(this.applicationContext, fileData.filename);
+      const filePath = task.filePath(this.applicationContext, fileData.filename);
       const stat = fs.statSync(filePath);
       const fileSize = stat.size;
 
@@ -237,7 +259,7 @@ export class UploadTaskWorker extends TaskWorker {
 
     // 2. Prepare headers object, as requested
     const headers: rcp.RequestHeaders = {} as rcp.RequestHeaders;
-    for (const entry of this.task.headers.entries()) {
+    for (const entry of task.headers.entries()) {
       headers[entry[0]] = entry[1];
     }
     headers['Content-Type'] = `multipart/form-data; boundary=${boundary}`;
@@ -258,7 +280,7 @@ export class UploadTaskWorker extends TaskWorker {
       try {
         let partWritten = false;
 
-        console.log(`fieldParts length ${fieldParts.length}`);
+        console.info(UploadTaskWorker.TAG, `fieldParts length ${fieldParts.length}`);
 
         // 写入表单字段
         for (const part of fieldParts) {
@@ -283,11 +305,11 @@ export class UploadTaskWorker extends TaskWorker {
           // 写入文件头
           networkInputQueue.write(fileHeaderParts[i]);
           bytesSent += fileHeaderParts[i].byteLength;
-          console.log("fileHeaderParts send ",
+          console.info(UploadTaskWorker.TAG, "fileHeaderParts send ",
             `${new util.TextDecoder().decodeToString(new Uint8Array(fileHeaderParts[i]))}`);
 
           // 分块写入文件内容
-          const filePath = this.task.filePath(this.applicationContext, filesData[i].filename);
+          const filePath = task.filePath(this.applicationContext, filesData[i].filename);
           const fileSize = fileSizes[i];
           let file: fs.File | undefined;
           try {
@@ -298,7 +320,7 @@ export class UploadTaskWorker extends TaskWorker {
               if (this.isCancelled) {
                 break;
               }
-              console.log("upload task bytesRead ", bytesReadInFile);
+              console.info(UploadTaskWorker.TAG, "upload task bytesRead ", bytesReadInFile);
               if (networkInputQueue.getFreeSpace() > TaskWorker.BUFFER_SIZE) {
                 const len = fs.readSync(file.fd, buffer);
                 if (len > 0) {
@@ -311,7 +333,7 @@ export class UploadTaskWorker extends TaskWorker {
                   if (this.prefs) {
                     const progress = Math.min(1.0, bytesSent / totalContentLength);
                     if (this.shouldSendProgressUpdate(progress, Date.now())) {
-                      await TaskWorker.processProgressUpdate(this.task, progress, this.prefs, totalContentLength);
+                      await TaskWorker.processProgressUpdate(task, progress, this.prefs, totalContentLength);
                     }
                   }
                 } else {
@@ -337,7 +359,7 @@ export class UploadTaskWorker extends TaskWorker {
 
       } catch (e) {
         console.error(UploadTaskWorker.TAG,
-          `Upload request error when writeToQueue for taskId ${this.task.taskId}: ${e.message}`);
+          `Upload request error when writeToQueue for taskId ${task.taskId}: ${e.message}`);
       }
     };
     writeToQueue();
@@ -354,7 +376,7 @@ export class UploadTaskWorker extends TaskWorker {
           this.setTaskException(error);
         }
       }
-      console.error(UploadTaskWorker.TAG, `Upload request error for taskId ${this.task.taskId}: ${error.message}`);
+      console.error(UploadTaskWorker.TAG, `Upload request error for taskId ${task.taskId}: ${error.message}`);
       return TaskStatus.FAILED;
     } finally {
       networkInputQueue.close(); // Ensure the queue is closed after all data is written
@@ -363,23 +385,27 @@ export class UploadTaskWorker extends TaskWorker {
   }
 
   private async process(response: rcp.Response): Promise<TaskStatus> {
+    const task = this.task;
+    if (!task) {
+      return TaskStatus.FAILED;
+    }
     this.responseStatusCode = response.statusCode;
     // this.responseHeaders = new Map(Object.entries(response.headers));
     const decoder = new util.TextDecoder();
     if (this.responseStatusCode >= 200 && this.responseStatusCode < 300) {
-      if (response.body != null) {
-        const uint8Array = new Uint8Array(response.body);
+      if (response.body !== null && response.body !== undefined) {
+        const uint8Array = new Uint8Array(response.body as ArrayBuffer);
         this.responseBody = decoder.decodeToString(uint8Array);
         console.info(UploadTaskWorker.TAG, `Response body ${this.responseBody}`);
       }
-      await TaskWorker.processProgressUpdate(this.task, 1.0, this.prefs!);
-      console.info(UploadTaskWorker.TAG, `Successfully uploaded taskId ${this.task.taskId}`);
+      await TaskWorker.processProgressUpdate(task, 1.0, this.prefs!);
+      console.info(UploadTaskWorker.TAG, `Successfully uploaded taskId ${task.taskId}`);
       return TaskStatus.COMPLETE;
     } else {
       this.cancel();
-      console.info(UploadTaskWorker.TAG, `Response code ${this.responseStatusCode} for taskId ${this.task.taskId}`);
-      if (response.body != null) {
-        const uint8Array = new Uint8Array(response.body);
+      console.info(UploadTaskWorker.TAG, `Response code ${this.responseStatusCode} for taskId ${task.taskId}`);
+      if (response.body !== null && response.body !== undefined) {
+        const uint8Array = new Uint8Array(response.body as ArrayBuffer);
         this.responseBody = decoder.decodeToString(uint8Array);
         console.info(UploadTaskWorker.TAG, `Response body ${this.responseBody}`);
       }
@@ -407,7 +433,7 @@ export class UploadTaskWorker extends TaskWorker {
     let header =
       `Content-Disposition: form-data; name=\"${this.browserEncode(fileField)}\"; filename=\"${this.browserEncode(filename)}\"${lineFeed}`;
     header += `Content-Type: ${mimeType}${lineFeed}`;
-    console.log(`fileHeaderParts ${header}`);
+    console.info(UploadTaskWorker.TAG, `fileHeaderParts ${header}`);
     return `${header}${lineFeed}`; // Two line feeds after headers
   }
 

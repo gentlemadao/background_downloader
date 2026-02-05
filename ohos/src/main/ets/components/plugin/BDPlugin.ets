@@ -79,7 +79,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
     plugin?: BDPlugin
   ): Promise<boolean> {
 
-    console.log(BDPlugin.TAG, `Enqueuing task with id ${task.taskId}`);
+    console.info(BDPlugin.TAG, `Enqueuing task with id ${task.taskId}`);
     const bgChannel = BDPlugin.methodBackgroundChannel(plugin);
     if (bgChannel) {
       BDPlugin.bgChannelByTaskId.set(task.taskId, bgChannel);
@@ -130,7 +130,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
     this.binaryMessenger = binding.getBinaryMessenger()
     this.backgroundChannel =
       new MethodChannel(binding.getBinaryMessenger(), 'com.bbflight.background_downloader.background');
-    if (BDPlugin.firstBackgroundChannel == undefined) {
+    if (BDPlugin.firstBackgroundChannel === undefined) {
       BDPlugin.firstBackgroundChannel = this.backgroundChannel;
     }
     this.channel = new MethodChannel(binding.getBinaryMessenger(), 'com.bbflight.background_downloader')
@@ -156,7 +156,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
 
   async onMethodCall(call: MethodCall, result: MethodResult): Promise<void> {
 
-    console.log('BDPlugin received method call: ' + call.method);
+    console.info(BDPlugin.TAG, 'Received method call: ' + call.method);
     switch (call.method) {
       case 'enqueue':
         await this.methodEnqueue(call, result);
@@ -253,11 +253,11 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
                 }
               });
           } catch (error) {
-            console.error(`Operation startBackgroundRunning failed. code is ${(error as BusinessError).code} message is ${(error as BusinessError).message}`);
+            console.error(BDPlugin.TAG, `Operation startBackgroundRunning failed. code is ${(error as BusinessError).code} message is ${(error as BusinessError).message}`);
           }
         });
       } catch (error) {
-        console.error(`Operation getWantAgent failed. code is ${(error as BusinessError).code} message is ${(error as BusinessError).message}`);
+        console.error(BDPlugin.TAG, `Operation getWantAgent failed. code is ${(error as BusinessError).code} message is ${(error as BusinessError).message}`);
       }
     } catch (e) {
       const error = e as BusinessAbilityError;
@@ -288,7 +288,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
   }
 
   public static async cancelTasksWithIds(context: common.UIAbilityContext, taskIds: string[]): Promise<boolean> {
-    console.log(BDPlugin.TAG, `Canceling tasks with ids: ${taskIds.join(', ')}`);
+    console.info(BDPlugin.TAG, `Canceling tasks with ids: ${taskIds.join(', ')}`);
     for (const taskId of taskIds) {
       BDPlugin.canceledTaskIds.add(taskId);
     }
@@ -373,7 +373,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
         }
       });
 
-      console.log(BDPlugin.TAG,
+      console.info(BDPlugin.TAG,
         `Returning ${tasksAsListOfJsonStrings.length} unfinished tasks in group ${group ?? 'any'}`);
       result.success(tasksAsListOfJsonStrings);
     } catch (e) {
@@ -425,7 +425,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
         canceledCount += activeTaskIdsToCancel.length;
       }
 
-      console.log(BDPlugin.TAG, `methodReset removed ${canceledCount} unfinished tasks in group ${group}`);
+      console.info(BDPlugin.TAG, `methodReset removed ${canceledCount} unfinished tasks in group ${group}`);
       result.success(canceledCount);
     } catch (e) {
       console.error(BDPlugin.TAG, "Error in methodReset", e);
@@ -468,7 +468,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
     }
     try {
       const taskIds = call.args as string[];
-      console.log(BDPlugin.TAG, `Canceling tasks with ids: ${taskIds.join(', ')}`);
+      console.info(BDPlugin.TAG, `Canceling tasks with ids: ${taskIds.join(', ')}`);
 
       // Cancel tasks in the holding queue
       const canceledInQueue = await BDPlugin.holdingQueue?.cancelTasksWithIds(BDPlugin.uiContext, taskIds) ?? [];
@@ -494,8 +494,8 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
     try {
       const args = call.args as Array<string | number | undefined>;
       const taskJsonMapString = args[0] as string;
-      console.log(taskJsonMapString);
-      const task = Task.fromObject(JSON.parse(taskJsonMapString));
+      console.info(BDPlugin.TAG, taskJsonMapString);
+      const task = Task.fromObject(JSON.parse(taskJsonMapString) as ESObject);
       const notificationConfigJsonString = args[1] as string | undefined;
 
       const isResume = args.length >= 4;
@@ -532,7 +532,7 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
 
   private methodConfigHoldingQueue(call: MethodCall, result: MethodResult) {
     let args: Array<number> = call.args as Array<number>;
-    if (args.length == 0) {
+    if (args.length === 0) {
       BDPlugin.holdingQueue = undefined;
     } else {
       BDPlugin.holdingQueue = BDPlugin.holdingQueue ?? new HoldingQueue();
@@ -562,9 +562,9 @@ export default class BDPlugin implements FlutterPlugin, MethodCallHandler, Abili
 
     const task = new taskpool.Task(enqueueAllTask, taskListJsonString, notificationConfigListJsonString, result, this);
     taskpool.execute(task).then(() => {
-      console.info('execute methodEnqueueAll success');
+      console.info(BDPlugin.TAG, 'execute methodEnqueueAll success');
     }).catch((e: BusinessError) => {
-      console.error(`execute methodEnqueueAll error: ${e.message}`);
+      console.error(BDPlugin.TAG, `execute methodEnqueueAll error: ${e.message}`);
     })
   }
 }

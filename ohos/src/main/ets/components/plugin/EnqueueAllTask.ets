@@ -41,7 +41,7 @@ export async function enqueueAllTask(
             plugin
           );
         } else {
-          console.log(BDPlugin.TAG, `Enqueueing task with id ${task.taskId} to the HoldingQueue`);
+          console.info(BDPlugin.TAG, `Enqueueing task with id ${task.taskId} to the HoldingQueue`);
           BDPlugin.holdingQueue.add(
             new EnqueueItem(
               BDPlugin.uiContext!,

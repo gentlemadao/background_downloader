@@ -30,18 +30,23 @@ export class NotificationService {
    */
   public static async updateNotification(worker: TaskWorker, status: TaskStatus, progress: number = 2.0,
     timeRemaining: number = -1) {
+    const task = worker.task;
+    if (!task) {
+      console.warn(TAG, "Cannot update notification: task is undefined");
+      return;
+    }
     const notificationType = NotificationService.notificationTypeForTaskStatus(status);
     const config = worker.notificationConfig;
 
     if (!config) {
-      await NotificationService.cancelNotification(worker.task.taskId);
+      await NotificationService.cancelNotification(task.taskId);
       return;
     }
 
     const notification = NotificationService.notificationForType(notificationType, config);
 
     if (!notification) {
-      await NotificationService.cancelNotification(worker.task.taskId);
+      await NotificationService.cancelNotification(task.taskId);
       return;
     }
 
@@ -49,11 +54,11 @@ export class NotificationService {
       await NotificationService.createNotificationChannel();
     }
 
-    const notificationId = hashCode(worker.task.taskId);
+    const notificationId = hashCode(task.taskId);
     const title =
-      NotificationService.replaceTokens(notification.title, worker.task, progress, worker.networkSpeed, timeRemaining);
+      NotificationService.replaceTokens(notification.title, task, progress, worker.networkSpeed, timeRemaining);
     const body =
-      NotificationService.replaceTokens(notification.body, worker.task, progress, worker.networkSpeed, timeRemaining);
+      NotificationService.replaceTokens(notification.body, task, progress, worker.networkSpeed, timeRemaining);
 
     let request: notificationManager.NotificationRequest;
 
@@ -86,7 +91,7 @@ export class NotificationService {
             name: 'downloadTemplate',
             data: {
               title: title,
-              fileName: worker.task.filename,
+              fileName: task.filename,
               progressValue: currentProgress,
               progressMaxValue: 100
             }
@@ -143,8 +148,10 @@ export class NotificationService {
 
   private static async createActionButtons(worker: TaskWorker,
     type: NotificationType): Promise<notificationManager.NotificationActionButton[]> {
+    const task = worker.task;
+    if (!task) return [];
     const buttons: notificationManager.NotificationActionButton[] = [];
-    const taskId = worker.task.taskId;
+    const taskId = task.taskId;
 
     if (type === NotificationType.running) {
       buttons.push({
@@ -246,7 +253,7 @@ export class NotificationService {
       networkSpeed > 1 ? `${Math.round(networkSpeed)} MB/s` : `${Math.round(networkSpeed * 1000)} kB/s`;
     output = output.replace(/{networkSpeed}/g, speedString);
 
-    if (timeRemaining != null) {
+    if (timeRemaining !== null) {
       const hours = Math.floor(timeRemaining / 3600000);
       const minutes = Math.floor((timeRemaining % 3600000) / 60000);
       const seconds = Math.floor((timeRemaining % 60000) / 1000);
@@ -265,7 +272,7 @@ export class NotificationService {
     if (!notificationConfigJsonString) {
       return;
     }
-    const notificationConfig = NotificationConfig.fromObject(JSON.parse(notificationConfigJsonString));
+    const notificationConfig = NotificationConfig.fromObject(JSON.parse(notificationConfigJsonString) as ESObject);
     const groupNotificationId = notificationConfig.groupNotificationId;
     if (groupNotificationId) {
       NotificationService.createUpdateNotificationWorker(
