@@ -8,3 +8,5 @@
 /BuildProfile.ets
 /oh-package-lock.json5
 local.properties
+.hvigor/
+package-lock.json

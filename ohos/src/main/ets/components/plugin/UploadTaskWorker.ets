@@ -19,6 +19,9 @@ interface FileField {
 export class UploadTaskWorker extends TaskWorker {
   private static readonly boundary = '-----background_downloader-akjhfw281onqciyhnIk';
   private static readonly lineFeed = '\r\n';
+  private static readonly asciiOnlyRegEx = /^[\\x00-\\x7F]+$/;
+  private static readonly jsonStringRegEx = /^\s*(\{.*\}|\[.*\])\s*$/;
+  private static readonly multiValueRegEx = /^(?:"[^"]+"\s*,\s*)+"[^"]+"$/;
 
   constructor(applicationContext: common.UIAbilityContext, want: Want) {
     super(applicationContext, want);
@@ -96,70 +99,113 @@ export class UploadTaskWorker extends TaskWorker {
       return TaskStatus.FAILED;
     }
     const filePath = task.filePath(this.applicationContext);
-    const networkInputQueue = new rcp.NetworkInputQueue();
 
-    // Producer: Reads the file and writes it to the queue
-    let file: fs.File | undefined;
-    try {
-      file = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
-      const stat = fs.statSync(filePath);
-      let bytesRead = 0;
-      const buffer = new ArrayBuffer(TaskWorker.BUFFER_SIZE);
-      while (bytesRead < stat.size) {
-        const len = fs.readSync(file.fd, buffer, { offset: bytesRead });
-        if (len > 0) {
-          // The queue takes ownership of the buffer, so we need to copy it
-          // or create a new one for each write.
-          const chunkToWrite = new ArrayBuffer(len);
-          new Uint8Array(chunkToWrite).set(new Uint8Array(buffer, 0, len));
-          networkInputQueue.write(chunkToWrite);
-          bytesRead += len;
-
-          if (this.prefs) {
-            const progress =
-              stat.size > 0 ? Math.min(1.0, (this.startByte + bytesRead) / (this.startByte + stat.size)) :
-                -1.0;
-            if (this.shouldSendProgressUpdate(progress, Date.now())) {
-              await TaskWorker.processProgressUpdate(task, progress, this.prefs, stat.size);
-            }
-          }
-        } else {
-          break; // End of file
-        }
-      }
-    } catch (e) {
-      console.error(UploadTaskWorker.TAG, `File read error: ${e.message}`);
-      this.taskException = new TaskException(ExceptionType.FILESYSTEM, e.code,
-        `File to upload does not exist or cannot be read: ${filePath}`);
-    } finally {
-      if (file) {
-        fs.closeSync(file);
-      }
-      networkInputQueue.close();
-    }
-
-
-    // Consumer: The rcp engine reads from the queue and uploads
 
     const url = task.url;
     const stat = fs.statSync(filePath);
     const fileSize = stat.size;
 
+    // Extract Range header information
+    let start = 0;
+    let end = fileSize - 1;
+    const rangeHeader = task.headers.get('Range');
+    if (rangeHeader) {
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+      if (match) {
+        start = parseInt(match[1]);
+        if (match[2]) {
+          end = parseInt(match[2]);
+        }
+      } else {
+        console.warn(UploadTaskWorker.TAG, `Invalid Range header ${rangeHeader}`);
+        this.taskException = new TaskException(ExceptionType.GENERAL, -1, `Invalid Range header ${rangeHeader}`);
+        return TaskStatus.FAILED;
+      }
+    }
+    const contentLength = end - start + 1;
+
     const headers: rcp.RequestHeaders = {} as rcp.RequestHeaders;
     for (const entry of task.headers.entries()) {
       headers[entry[0]] = entry[1];
     }
-    headers['Content-Length'] = fileSize.toString();
+    headers['Content-Length'] = contentLength.toString();
     const taskContentDisposition =
       task.headers.get('Content-Disposition') ?? task.headers.get('content-disposition');
-    if (taskContentDisposition !== "") {
-      headers['Content-Disposition'] =
-        taskContentDisposition ?? `attachment; filename="${encodeURI(task.filename)}"`;
+    if (taskContentDisposition && taskContentDisposition !== "") { // Check for not empty
+      headers['Content-Disposition'] = taskContentDisposition;
+    } else if (!task.headers.has('Content-Disposition') && !task.headers.has('content-disposition')) {
+       // Only add default if not present at all (or empty string in Android logic means omit)
+       // Android: if value is "", omit. if null, set default.
+       headers['Content-Disposition'] = `attachment; filename="${encodeURI(task.filename)}"`;
     }
 
-    const session = rcp.createSession({
+    const session = await TaskWorker.createSession(this.prefs!, {
       headers: headers,
+      requestConfiguration: {
+        transfer: {
+          timeout: {
+            transferMs: this.prefs ? 
+                await this.prefs.get(BDPlugin.KEY_CONFIG_REQUEST_TIMEOUT, TaskWorker.TASK_TIMEOUT_MILLIS) as number :
+                TaskWorker.TASK_TIMEOUT_MILLIS
+          }
+        }
+      }
     });
+
+    // Producer: Reads the file and writes it to the queue
+    const networkInputQueue = new rcp.NetworkInputQueue();
+    const writeToQueue = async () => {
+        let file: fs.File | undefined;
+        try {
+          file = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
+          let bytesReadTotal = 0; // Bytes read relative to the Range start
+          // Seek to start
+          if (start > 0) {
+             // fs.readSync with offset parameter reads from file position `offset`, 
+             // but here we want to seek. The offset in readSync is absolute position in file.
+             // We can just maintain `currentFilePosition`
+          }
+          let currentFilePosition = start;
+
+          const buffer = new ArrayBuffer(TaskWorker.BUFFER_SIZE);
+          while (bytesReadTotal < contentLength) {
+            if (this.isCancelled) throw new Error("Task cancelled");
+
+            // Determine how much to read
+            const remaining = contentLength - bytesReadTotal;
+            const toRead = Math.min(TaskWorker.BUFFER_SIZE, remaining);
+            
+            const len = fs.readSync(file.fd, buffer, { offset: currentFilePosition, length: toRead });
+            if (len > 0) {
+              const chunkToWrite = new ArrayBuffer(len);
+              new Uint8Array(chunkToWrite).set(new Uint8Array(buffer, 0, len));
+              networkInputQueue.write(chunkToWrite);
+              
+              bytesReadTotal += len;
+              currentFilePosition += len;
+
+              if (this.prefs) {
+                const progress = contentLength > 0 ? Math.min(1.0, bytesReadTotal / contentLength) : -1.0;
+                if (this.shouldSendProgressUpdate(progress, Date.now())) {
+                  await TaskWorker.processProgressUpdate(task, progress, this.prefs, contentLength);
+                }
+              }
+            } else {
+              break; // EOF
+            }
+          }
+        } catch (e) {
+          console.error(UploadTaskWorker.TAG, `Binary upload write error: ${e.message}`);
+          networkInputQueue.close();
+          session.close();
+        } finally {
+          if (file) fs.closeSync(file);
+          networkInputQueue.close();
+        }
+    };
+    // Start producer
+    writeToQueue();
+
     try {
       const response = await session.post(url, networkInputQueue);
       return await this.process(response);
@@ -187,21 +233,39 @@ export class UploadTaskWorker extends TaskWorker {
     const partBoundary = `${lineFeed}--${boundary}${lineFeed}`;
     const finalBoundary = `${lineFeed}--${boundary}--${lineFeed}`;
 
-    // The producer logic runs in a separate, non-awaited promise.
-    // It calculates the total size, prepares headers, and then streams
-    // the body to the queue.
+    // Helper to calculate UTF-8 byte length
+    const textEncoder = new util.TextEncoder();
+    const getByteLength = (str: string): number => {
+      const result = textEncoder.encode(str);
+      return result.byteLength;
+    };
 
-    // 1. Calculate total size and prepare all parts
-    // Fields
-    const fieldParts: ArrayBuffer[] = [];
-    let fieldsSize = 0;
+    // --- Pass 1: Calculate Total Size ---
+    let totalContentLength = 0;
+    let fieldCount = 0;
+    let fileCount = 0;
+
+    // 1.1 Fields Size
     for (const entry of task.fields.entries()) {
-      const part = this.stringToArrayBuffer(this.fieldEntry(entry[0], entry[1]));
-      fieldParts.push(part);
-      fieldsSize += part.byteLength;
+      const matchMulti = entry[1].match(UploadTaskWorker.multiValueRegEx);
+      if (matchMulti) {
+        const valueMatches = entry[1].match(/"([^"]+)"/g);
+        if (valueMatches) {
+          for (const valWithQuotes of valueMatches) {
+            const val = valWithQuotes.substring(1, valWithQuotes.length - 1);
+            const partStr = this.fieldEntry(entry[0], val);
+            totalContentLength += getByteLength(partStr);
+            fieldCount++;
+          }
+        }
+      } else {
+        const partStr = this.fieldEntry(entry[0], entry[1]);
+        totalContentLength += getByteLength(partStr);
+        fieldCount++;
+      }
     }
 
-    // Files
+    // 1.2 Files Data Preparation (Metadata only)
     const filesData: FileField[] = [];
     if (task.isMultiUploadTask()) {
       const fileFields = JSON.parse(task.fileField) as string[];
@@ -222,42 +286,47 @@ export class UploadTaskWorker extends TaskWorker {
       });
     }
 
-    const fileHeaderParts: ArrayBuffer[] = [];
+    fileCount = filesData.length;
     const fileSizes: number[] = [];
-    let filesContentSize = 0;
+
     for (const fileData of filesData) {
       const filePath = task.filePath(this.applicationContext, fileData.filename);
-      const stat = fs.statSync(filePath);
-      const fileSize = stat.size;
-
+      let fileSize = 0;
+      try {
+        const stat = fs.statSync(filePath);
+        fileSize = stat.size;
+      } catch (e) {
+        console.error(UploadTaskWorker.TAG, `File not found: ${filePath}`);
+        // We continue, expecting write error later or 0 size
+      }
       fileSizes.push(fileSize);
-      filesContentSize += fileSize;
 
-      const fileHeaderPart =
-        this.stringToArrayBuffer(this.fileHeader(fileData.fileField, fileData.filename, fileData.mimeType));
-      fileHeaderParts.push(fileHeaderPart);
+      let mimeType = fileData.mimeType;
+      if (!mimeType || mimeType.length === 0) {
+        mimeType = this.getMimeType(fileData.filename);
+      }
+      
+      // Store resolved mimeType back for Pass 2 to avoid re-logic
+      fileData.mimeType = mimeType; 
+
+      const headerStr = this.fileHeader(fileData.fileField, fileData.filename, mimeType);
+      totalContentLength += getByteLength(headerStr);
+      totalContentLength += fileSize;
     }
 
-    // Calculate total content length
-    let totalContentLength = 0;
-    if (fieldParts.length > 0 || filesData.length > 0) {
-      totalContentLength += initialBoundary.length;
-      totalContentLength += fieldParts.reduce((sum, part) => sum + part.byteLength, 0);
-      if (fieldParts.length > 1) {
-        totalContentLength += partBoundary.length * (fieldParts.length - 1);
+    // 1.3 Boundaries Size
+    const totalParts = fieldCount + fileCount;
+    if (totalParts > 0) {
+      totalContentLength += initialBoundary.length; // First boundary
+      if (totalParts > 1) {
+        totalContentLength += partBoundary.length * (totalParts - 1); // Middle boundaries
       }
-      if (filesData.length > 0 && fieldParts.length > 0) {
-        totalContentLength += partBoundary.length;
-      }
-      totalContentLength += fileHeaderParts.reduce((sum, part) => sum + part.byteLength, 0);
-      totalContentLength += fileSizes.reduce((sum, size) => sum + size, 0);
-      if (filesData.length > 1) {
-        totalContentLength += partBoundary.length * (filesData.length - 1);
-      }
-      totalContentLength += finalBoundary.length;
+      totalContentLength += finalBoundary.length; // End boundary
     }
 
-    // 2. Prepare headers object, as requested
+    console.info(UploadTaskWorker.TAG, `Total content length: ${totalContentLength}`);
+
+    // --- Prepare Headers & Session ---
     const headers: rcp.RequestHeaders = {} as rcp.RequestHeaders;
     for (const entry of task.headers.entries()) {
       headers[entry[0]] = entry[1];
@@ -265,92 +334,125 @@ export class UploadTaskWorker extends TaskWorker {
     headers['Content-Type'] = `multipart/form-data; boundary=${boundary}`;
     headers['Content-Length'] = totalContentLength.toString();
 
-    const session = rcp.createSession();
+    const configTimeout = this.prefs ?
+      await this.prefs.get(BDPlugin.KEY_CONFIG_REQUEST_TIMEOUT, TaskWorker.TASK_TIMEOUT_MILLIS) as number :
+    TaskWorker.TASK_TIMEOUT_MILLIS;
+
+    const session = await TaskWorker.createSession(this.prefs!);
 
     let request = new rcp.Request(url, "POST", headers, networkInputQueue, undefined, undefined, {
       transfer: {
         timeout: {
-          transferMs: TaskWorker.TASK_TIMEOUT_MILLIS
+          transferMs: configTimeout
         }
       }
     });
 
+    // --- Pass 2: Stream Data (Producer) ---
     const writeToQueue = async () => {
       let bytesSent = 0;
+      let partWritten = false;
+
       try {
-        let partWritten = false;
+        // 2.1 Write Fields
+        for (const entry of task.fields.entries()) {
+          const processField = (name: string, value: string) => {
+            if (this.isCancelled) throw new Error("Task cancelled");
+            
+            // Write Boundary
+            const boundaryStr = partWritten ? partBoundary : initialBoundary;
+            const boundaryBuffer = this.stringToArrayBuffer(boundaryStr);
+            networkInputQueue.write(boundaryBuffer);
+            bytesSent += boundaryBuffer.byteLength;
 
-        console.info(UploadTaskWorker.TAG, `fieldParts length ${fieldParts.length}`);
+            // Write Header & Value
+            const partStr = this.fieldEntry(name, value);
+            const partBuffer = this.stringToArrayBuffer(partStr);
+            networkInputQueue.write(partBuffer);
+            bytesSent += partBuffer.byteLength;
+            
+            partWritten = true;
+          };
 
-        // 写入表单字段
-        for (const part of fieldParts) {
-          const boundaryStr = partWritten ? partBoundary : initialBoundary;
-          const boundaryBuffer = this.stringToArrayBuffer(boundaryStr);
-          networkInputQueue.write(boundaryBuffer);
-          bytesSent += boundaryBuffer.byteLength;
-
-          networkInputQueue.write(part);
-          bytesSent += part.byteLength;
-          partWritten = true;
+          const matchMulti = entry[1].match(UploadTaskWorker.multiValueRegEx);
+          if (matchMulti) {
+            const valueMatches = entry[1].match(/"([^"]+)"/g);
+            if (valueMatches) {
+              for (const valWithQuotes of valueMatches) {
+                const val = valWithQuotes.substring(1, valWithQuotes.length - 1);
+                processField(entry[0], val);
+              }
+            }
+          } else {
+            processField(entry[0], entry[1]);
+          }
         }
 
-        // Write files
+        // 2.2 Write Files
         for (let i = 0; i < filesData.length; i++) {
+          if (this.isCancelled) throw new Error("Task cancelled");
+          
+          // Write Boundary
           const boundaryStr = partWritten ? partBoundary : initialBoundary;
           const boundaryBuffer = this.stringToArrayBuffer(boundaryStr);
           networkInputQueue.write(boundaryBuffer);
           bytesSent += boundaryBuffer.byteLength;
           partWritten = true;
 
-          // 写入文件头
-          networkInputQueue.write(fileHeaderParts[i]);
-          bytesSent += fileHeaderParts[i].byteLength;
-          console.info(UploadTaskWorker.TAG, "fileHeaderParts send ",
-            `${new util.TextDecoder().decodeToString(new Uint8Array(fileHeaderParts[i]))}`);
+          // Write File Header
+          const fileData = filesData[i];
+          const headerStr = this.fileHeader(fileData.fileField, fileData.filename, fileData.mimeType);
+          const headerBuffer = this.stringToArrayBuffer(headerStr);
+          networkInputQueue.write(headerBuffer);
+          bytesSent += headerBuffer.byteLength;
 
-          // 分块写入文件内容
-          const filePath = task.filePath(this.applicationContext, filesData[i].filename);
+          // Stream File Content
+          const filePath = task.filePath(this.applicationContext, fileData.filename);
           const fileSize = fileSizes[i];
           let file: fs.File | undefined;
           try {
             file = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
-            let bytesReadInFile = 0; // Track bytes read for the current file
+            let bytesReadInFile = 0;
             const buffer = new ArrayBuffer(TaskWorker.BUFFER_SIZE);
+            
             while (bytesReadInFile < fileSize) {
-              if (this.isCancelled) {
-                break;
-              }
-              console.info(UploadTaskWorker.TAG, "upload task bytesRead ", bytesReadInFile);
+              if (this.isCancelled) throw new Error("Task cancelled");
+              
               if (networkInputQueue.getFreeSpace() > TaskWorker.BUFFER_SIZE) {
                 const len = fs.readSync(file.fd, buffer);
                 if (len > 0) {
+                  // Must copy because fs.readSync reuses buffer, but networkInputQueue might be async processing?
+                  // Actually strict concurrency sharing in ArkTS often requires copying or transfer.
+                  // rcp.NetworkInputQueue.write takes ArrayBuffer.
                   const chunkToWrite = new ArrayBuffer(len);
                   new Uint8Array(chunkToWrite).set(new Uint8Array(buffer, 0, len));
                   networkInputQueue.write(chunkToWrite);
+                  
                   bytesReadInFile += len;
-                  bytesSent += len; // Accumulate total bytes sent
+                  bytesSent += len;
 
                   if (this.prefs) {
-                    const progress = Math.min(1.0, bytesSent / totalContentLength);
+                    const progress = totalContentLength > 0 ? Math.min(1.0, bytesSent / totalContentLength) : 0;
                     if (this.shouldSendProgressUpdate(progress, Date.now())) {
                       await TaskWorker.processProgressUpdate(task, progress, this.prefs, totalContentLength);
                     }
                   }
                 } else {
-                  break; // End of file
+                  break; // EOF
                 }
               } else {
-                await delay(30);
+                await delay(30); // Backpressure handling
               }
             }
+          } catch(err) {
+             console.error(UploadTaskWorker.TAG, `File read error: ${err}`);
+             throw err as Error;
           } finally {
-            if (file) {
-              fs.closeSync(file);
-            }
+            if (file) fs.closeSync(file);
           }
         }
 
-        // 写入最终边界
+        // 2.3 Write Final Boundary
         if (partWritten) {
           const finalBoundaryBuffer = this.stringToArrayBuffer(finalBoundary);
           networkInputQueue.write(finalBoundaryBuffer);
@@ -358,11 +460,16 @@ export class UploadTaskWorker extends TaskWorker {
         }
 
       } catch (e) {
-        console.error(UploadTaskWorker.TAG,
-          `Upload request error when writeToQueue for taskId ${task.taskId}: ${e.message}`);
+        console.error(UploadTaskWorker.TAG, `Upload stream error: ${e.message}`);
+        networkInputQueue.close();
+        session.close();
       }
     };
-    writeToQueue();
+
+    // Start producer (fire and forget, handled via queue interaction)
+    writeToQueue().catch((err: BusinessError) => {
+      console.error(UploadTaskWorker.TAG, `Unhandled error in writeToQueue: ${err.message}`);
+    });
 
     try {
       const response = await session.fetch(request);
@@ -379,7 +486,7 @@ export class UploadTaskWorker extends TaskWorker {
       console.error(UploadTaskWorker.TAG, `Upload request error for taskId ${task.taskId}: ${error.message}`);
       return TaskStatus.FAILED;
     } finally {
-      networkInputQueue.close(); // Ensure the queue is closed after all data is written
+      networkInputQueue.close();
       session.close();
     }
   }
@@ -420,12 +527,15 @@ export class UploadTaskWorker extends TaskWorker {
 
   private fieldEntry(name: string, value: string): string {
     const lineFeed = UploadTaskWorker.lineFeed;
-    let header = `Content-Disposition: form-data; name=\"${this.browserEncode(name)}\"${lineFeed}`;
-    // Add content type for JSON strings
-    if (value.trim().startsWith('{') || value.trim().startsWith('[')) {
-      header += `Content-Type: application/json; charset=utf-8${lineFeed}`;
+    let header = `Content-Disposition: form-data; name=\"${this.browserEncode(name)}\"`;
+    
+    if (value.match(UploadTaskWorker.jsonStringRegEx)) {
+      header += `${lineFeed}Content-Type: application/json; charset=utf-8`;
+    } else if (!value.match(UploadTaskWorker.asciiOnlyRegEx)) {
+      header += `${lineFeed}Content-Type: text/plain; charset=utf-8${lineFeed}Content-Transfer-Encoding: binary`;
     }
-    return `${header}${lineFeed}${value}`;
+    
+    return `${header}${lineFeed}${lineFeed}${value}`;
   }
 
   private fileHeader(fileField: string, filename: string, mimeType: string): string {
@@ -435,6 +545,23 @@ export class UploadTaskWorker extends TaskWorker {
     header += `Content-Type: ${mimeType}${lineFeed}`;
     console.info(UploadTaskWorker.TAG, `fileHeaderParts ${header}`);
     return `${header}${lineFeed}`; // Two line feeds after headers
+  }
+
+  private getMimeType(filename: string): string {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    switch (ext) {
+      case 'txt': return 'text/plain';
+      case 'html': return 'text/html';
+      case 'json': return 'application/json';
+      case 'png': return 'image/png';
+      case 'jpg':
+      case 'jpeg': return 'image/jpeg';
+      case 'gif': return 'image/gif';
+      case 'mp4': return 'video/mp4';
+      case 'mp3': return 'audio/mpeg';
+      case 'pdf': return 'application/pdf';
+      default: return 'application/octet-stream';
+    }
   }
 
   private escapeMultipartParameter(value: string): string {
@@ -447,8 +574,8 @@ export class UploadTaskWorker extends TaskWorker {
 
   private stringToArrayBuffer(str: string): ArrayBuffer {
     const textEncoder = new util.TextEncoder();
-    const uint8Array = textEncoder.encodeInto(str);
-    return uint8Array.buffer;
+    const uint8Array = textEncoder.encode(str);
+    return uint8Array.buffer as ArrayBuffer;
   }
 
   protected setTaskException(e: BusinessError) {

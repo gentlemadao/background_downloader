@@ -3,23 +3,25 @@ import {
   TaskStatus,
   ExceptionType,
   TaskException,
-  TaskParams,
+  NotificationConfig,
   TaskWantParams,
+  Chunk
 } from './Models';
 import { TaskWorker } from './TaskWorker';
 import { common } from '@kit.AbilityKit';
-import {http} from '@kit.NetworkKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import BDPlugin from './BDPlugin';
 import { Want } from '@kit.AbilityKit';
+import { rcp } from '@kit.RemoteCommunicationKit';
 import { NotificationService } from './Notifications';
 import { preferences } from '@kit.ArkData';
-import { DownloadTaskWorker } from './DownloadTaskWorker';
-import { collections } from '@kit.ArkTS';
 
 export class ParallelDownloadTaskWorker extends TaskWorker {
-  private chunkTasks: DownloadTaskWorker[] = [];
+  private chunks: Chunk[] = [];
+  private totalSize: number = 0;
+  private downloadedBytes: number = 0;
+  private fileFd: number = -1;
 
   constructor(applicationContext: common.UIAbilityContext, want: Want) {
     super(applicationContext, want);
@@ -27,17 +29,23 @@ export class ParallelDownloadTaskWorker extends TaskWorker {
 
   override async doWork(): Promise<void> {
     try {
+      this.startTimeout();
       const options: preferences.Options = { name: 'DEFAULT' };
       this.prefs = await preferences.getPreferences(this.applicationContext, options);
-      const params = new TaskWantParams(this.want.parameters as Record<string, Object>);
+      
+      const params = new TaskWantParams(this.want.parameters);
       this.task = Task.fromObject(JSON.parse(params.keyTask) as ESObject);
       this.notificationConfigJsonString = params.keyNotificationConfig;
+      
+      if (this.notificationConfigJsonString) {
+        this.notificationConfig = NotificationConfig.fromObject(JSON.parse(this.notificationConfigJsonString) as ESObject);
+      }
 
-      console.info(ParallelDownloadTaskWorker.TAG, `Starting parallel download task with taskId ${this.task?.taskId}`);
       if (this.task) {
         await TaskWorker.processStatusUpdate(this.task, TaskStatus.RUNNING, this.prefs);
         await TaskWorker.processProgressUpdate(this.task, 0.0, this.prefs);
       }
+      
       NotificationService.updateNotification(this, TaskStatus.RUNNING);
 
       const status = await this.doTaskInternal();
@@ -49,136 +57,123 @@ export class ParallelDownloadTaskWorker extends TaskWorker {
           this.prefs,
           this.taskException,
           this.responseBody,
-          undefined, // responseHeaders
+          undefined,
           this.responseStatusCode,
-          undefined, // mimeType
-          undefined, // charSet
+          undefined,
+          undefined,
           this.applicationContext
         );
-        if (status !== TaskStatus.FAILED || this.task.retriesRemaining === 0) {
-          NotificationService.updateNotification(this, status);
-        }
-        if (status !== TaskStatus.CANCELED) {
-          BDPlugin.holdingQueue?.taskFinished(this.task);
-        }
+        NotificationService.updateNotification(this, status);
+        BDPlugin.holdingQueue?.taskFinished(this.task);
       }
     } catch (e) {
-      const error = e as BusinessError;
-      console.error(ParallelDownloadTaskWorker.TAG, `Fatal error in doWork: ${error.message}`);
+      console.error(ParallelDownloadTaskWorker.TAG, `Parallel download fatal error: ${(e as BusinessError).message}`);
     } finally {
+      if (this.fileFd !== -1) {
+          fs.closeSync(this.fileFd);
+      }
       this.hasDeliveredResult = true;
     }
   }
 
   private async doTaskInternal(): Promise<TaskStatus> {
     const task = this.task;
-    if (!task) {
-      return TaskStatus.FAILED;
-    }
+    if (!task || !this.prefs) return TaskStatus.FAILED;
+
+    const session = await TaskWorker.createSession(this.prefs!);
     try {
-      // Get the total file size
-      const httpRequest = http.createHttp();
-      const response = await httpRequest.request(task.url, { method: http.RequestMethod.HEAD });
-      const contentLength = parseInt(response.header['Content-Length'] as string ?? '-1');
-
-      if (contentLength <= 0) {
-        // Fallback to a single download
-        const downloadWorker = new DownloadTaskWorker(this.applicationContext, this.want);
-        await downloadWorker.doWork();
-        return TaskStatus.COMPLETE;
+      // 1. 获取文件信息 (HEAD)
+      const headRequest = new rcp.Request(task.url, 'HEAD');
+      const headResponse = await session.fetch(headRequest);
+      
+      if (headResponse.statusCode !== 200) {
+          this.taskException = new TaskException(ExceptionType.HTTP_RESPONSE, headResponse.statusCode, "Head request failed");
+          return TaskStatus.FAILED;
       }
 
-      const chunkSize = Math.ceil(contentLength / task.chunks);
-      const promises: Promise<void>[] = [];
+      this.totalSize = parseInt(headResponse.headers['content-length'] as string ?? '0');
+      const acceptRanges = headResponse.headers['accept-ranges'] as string;
+      
+      if (this.totalSize <= 0 || acceptRanges !== 'bytes') {
+          console.warn(ParallelDownloadTaskWorker.TAG, "Server does not support ranges or size is unknown, falling back to single download is not implemented here.");
+          return TaskStatus.FAILED;
+      }
 
-      for (let i = 0; i < task.chunks; i++) {
+      // 2. 准备文件
+      const destPath = task.filePath(this.applicationContext);
+      // 先创建/清空文件
+      const file = fs.openSync(destPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
+      fs.truncateSync(file.fd, 0);
+      this.fileFd = file.fd;
+
+      // 3. 计算分片
+      const numChunks = task.chunks > 0 ? task.chunks : 1;
+      const chunkSize = Math.ceil(this.totalSize / numChunks);
+      const chunkPromises: Promise<void>[] = [];
+
+      for (let i = 0; i < numChunks; i++) {
         const start = i * chunkSize;
-        const end = Math.min(start + chunkSize - 1, contentLength - 1);
-
-        const chunkHeaders = new collections.Map(task.headers.entries());
-        chunkHeaders.set('Range', `bytes=${start}-${end}`);
-
-        const chunkTaskParams: TaskParams = {
-          taskId: `${task.taskId}-chunk-${i}`,
-          url: task.url,
-          urls: task.urls,
-          filename: task.filename,
-          headers: chunkHeaders,
-          httpRequestMethod: task.httpRequestMethod,
-          chunks: task.chunks,
-          post: task.post,
-          fileField: task.fileField,
-          mimeType: task.mimeType,
-          fields: task.fields,
-          directory: task.directory,
-          baseDirectory: task.baseDirectory,
-          group: task.group,
-          updates: task.updates,
-          requiresWiFi: task.requiresWiFi,
-          retries: task.retries,
-          retriesRemaining: task.retriesRemaining,
-          allowPause: task.allowPause,
-          priority: task.priority,
-          metaData: task.metaData,
-          displayName: task.displayName,
-          creationTime: task.creationTime,
-          options: task.options,
-          taskType: task.taskType,
-        };
-
-        const chunkParams = new TaskWantParams();
-        chunkParams.keyTask = JSON.stringify(chunkTaskParams);
-
-        const chunkWant: Want = {
-          bundleName: this.want.bundleName,
-          abilityName: this.want.abilityName,
-          action: 'com.bbflight.background_downloader.chunk',
-          parameters: {
-            keyTask: chunkParams.keyTask,
-            keyNotificationConfig: chunkParams.keyNotificationConfig,
-            keyResumeDataData: chunkParams.keyResumeDataData,
-            keyStartByte: chunkParams.keyStartByte,
-            keyETag: chunkParams.keyETag
-          }
-        };
-        const chunkWorker = new DownloadTaskWorker(this.applicationContext, chunkWant);
-        this.chunkTasks.push(chunkWorker);
-        promises.push(chunkWorker.doWork());
+        const end = Math.min(start + chunkSize - 1, this.totalSize - 1);
+        const chunk = new Chunk(task.taskId, task.url, task.filename, destPath, start, end);
+        this.chunks.push(chunk);
+        chunkPromises.push(this.downloadChunk(session, chunk));
       }
 
-      await Promise.all(promises);
+      // 4. 等待所有分片完成
+      await Promise.all(chunkPromises);
 
-      // Combine the chunks
-      const destFilePath = task.filePath(this.applicationContext);
-      const destFile = fs.openSync(destFilePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
-      for (const chunkWorker of this.chunkTasks) {
-        const chunkTask = chunkWorker.task;
-        if (!chunkTask) continue;
-        const chunkFilePath = chunkTask.filePath(this.applicationContext);
-        const chunkFile = fs.openSync(chunkFilePath, fs.OpenMode.READ_ONLY);
-        const buffer = new ArrayBuffer(fs.statSync(chunkFilePath).size);
-        fs.readSync(chunkFile.fd, buffer);
-        fs.writeSync(destFile.fd, buffer);
-        fs.closeSync(chunkFile);
-        fs.unlinkSync(chunkFilePath);
+      // 检查是否有分片失败
+      if (this.chunks.some(c => !c.status.equals(TaskStatus.COMPLETE))) {
+          return TaskStatus.FAILED;
       }
-      fs.closeSync(destFile);
-
 
       return TaskStatus.COMPLETE;
+
     } catch (e) {
       const error = e as BusinessError;
+      console.error(ParallelDownloadTaskWorker.TAG, `Parallel download error: ${error.message}`);
       this.setTaskException(error);
-      console.error(ParallelDownloadTaskWorker.TAG, `Error for taskId ${task.taskId}: ${error.message}`);
+      return TaskStatus.FAILED;
+    } finally {
+      session.close();
     }
-    return TaskStatus.FAILED;
   }
 
-  protected  setTaskException(e: BusinessError) {
-    let exceptionType = ExceptionType.GENERAL;
-    if (e.code === 200 || e.code === 201) { // ETIMEDOUT or ENETUNREACH
-      exceptionType = ExceptionType.CONNECTION;
+  private async downloadChunk(session: rcp.Session, chunk: Chunk): Promise<void> {
+    try {
+      const request = new rcp.Request(chunk.url, 'GET');
+      request.headers = { 'Range': `bytes=${chunk.chunkStart}-${chunk.chunkEnd}` } as ESObject;
+      
+      chunk.status = TaskStatus.RUNNING;
+      
+      // 使用 fetch 获取数据流或完整 body
+      const response = await session.fetch(request);
+      
+      if (response.statusCode === 206 || response.statusCode === 200) {
+        if (response.body) {
+          const buffer = response.body;
+          fs.writeSync(this.fileFd, buffer, { offset: chunk.chunkStart });
+          
+          chunk.progress = 1.0;
+          chunk.status = TaskStatus.COMPLETE;
+          
+          // 聚合进度上报
+          this.downloadedBytes += buffer.byteLength;
+          const totalProgress = this.downloadedBytes / this.totalSize;
+          if (this.shouldSendProgressUpdate(totalProgress, Date.now()) && this.task && this.prefs) {
+              TaskWorker.processProgressUpdate(this.task, totalProgress, this.prefs, this.totalSize);
+          }
+        }
+      } else {
+        chunk.status = TaskStatus.FAILED;
+      }
+    } catch (e) {
+      console.error(ParallelDownloadTaskWorker.TAG, `Chunk download failed: ${(e as BusinessError).message}`);
+      chunk.status = TaskStatus.FAILED;
     }
-    this.taskException = new TaskException(exceptionType, -1, e.message);
+  }
+
+  protected setTaskException(e: BusinessError) {
+    this.taskException = new TaskException(ExceptionType.GENERAL, -1, e.message);
   }
 }

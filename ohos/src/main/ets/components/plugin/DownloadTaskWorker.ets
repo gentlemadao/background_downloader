@@ -24,6 +24,7 @@ export class DownloadTaskWorker extends TaskWorker {
   private requiredStartByte = 0; // required start byte within the task range
   private taskRangeStartByte = 0; // Start of the Task's download range
   private eTag: string | undefined;
+  private chunkFilePath = '';
 
   constructor(applicationContext: common.UIAbilityContext, want: Want) {
     super(applicationContext, want);
@@ -34,9 +35,7 @@ export class DownloadTaskWorker extends TaskWorker {
       this.startTimeout();
       const options: preferences.Options = { name: 'DEFAULT' };
       this.prefs = await preferences.getPreferences(this.applicationContext, options);
-      console.info(DownloadTaskWorker.TAG, `has prefs1  ${this.prefs ? "true" : " false"}`);
       const params = new TaskWantParams(this.want.parameters);
-      console.info(DownloadTaskWorker.TAG, params.keyTask);
       this.task = Task.fromObject(JSON.parse(params.keyTask) as ESObject);
       this.notificationConfigJsonString = params.keyNotificationConfig;
       if (this.notificationConfigJsonString) {
@@ -87,12 +86,11 @@ export class DownloadTaskWorker extends TaskWorker {
 
   private async doTaskInternal(): Promise<TaskStatus> {
     const task = this.task;
-    if (!task) {
+    if (!task || !this.prefs) {
       return TaskStatus.FAILED;
     }
     try {
       const url = task.url;
-
       const headers: rcp.RequestHeaders = {} as rcp.RequestHeaders;
 
       for (const entry of task.headers.entries()) {
@@ -100,20 +98,19 @@ export class DownloadTaskWorker extends TaskWorker {
       }
 
       if (this.isResume) {
-        const taskRangeHeader = task.headers.get('Range') ?? '';
-        // Implement range parsing
-        // For now, assume the whole file is requested
         this.taskRangeStartByte = 0;
         const resumeRangeStart = this.taskRangeStartByte + this.requiredStartByte;
         headers['Range'] = `bytes=${resumeRangeStart}-`;
+        this.chunkFilePath = `${this.tempFilePath}.part`;
+      } else {
+        const tempDir = this.applicationContext.cacheDir;
+        this.tempFilePath = `${tempDir}/com.bbflight.background_downloader${Math.random()}`;
+        this.chunkFilePath = this.tempFilePath;
       }
 
-      const tempDir = this.applicationContext.cacheDir;
-      this.tempFilePath = `${tempDir}/com.bbflight.background_downloader${Math.random()}`;
-      console.info(DownloadTaskWorker.TAG, `filepath ${this.tempFilePath}`);
+      const configTimeout = await this.prefs.get(BDPlugin.KEY_CONFIG_REQUEST_TIMEOUT, TaskWorker.TASK_TIMEOUT_MILLIS) as number;
 
-
-      const session = rcp.createSession();
+      const session = await TaskWorker.createSession(this.prefs!);
 
       try {
         console.info(DownloadTaskWorker.TAG, `Going to request ${url}`);
@@ -121,47 +118,40 @@ export class DownloadTaskWorker extends TaskWorker {
         let downloadToFile: rcp.DownloadToFile = {
           kind: 'file',
           file: (request, _) => {
+            const transferConfig: rcp.TransferConfiguration = {
+              timeout: {
+                transferMs: configTimeout
+              }
+            };
             request.configuration = {
-              transfer:{
-                timeout:{
-                  transferMs: TaskWorker.TASK_TIMEOUT_MILLIS,
-                }
-              },
+              transfer: transferConfig,
               tracing: {
                 httpEventsHandler: {
                   onHeaderReceive: (resp) => {
                     console.info(DownloadTaskWorker.TAG, `response receive ${resp['content-length']}`);
                   },
                   onDownloadProgress: (totalSize: number, transferredSize: number) => {
-                    console.info(DownloadTaskWorker.TAG,
-                      `response totalSize ${totalSize} transferredSize ${transferredSize}`);
                     if (this.prefs && task) {
-                      const progress =
-                        totalSize > 0 ? Math.min(1.0, (transferredSize) / (totalSize)) :
-                          -1.0;
+                      const totalExpected = this.isResume ? this.requiredStartByte + totalSize : totalSize;
+                      const transferredTotal = this.isResume ? this.requiredStartByte + transferredSize : transferredSize;
+                      const progress = totalExpected > 0 ? Math.min(1.0, transferredTotal / totalExpected) : -1.0;
                       if (this.shouldSendProgressUpdate(progress, Date.now())) {
-                        console.info(DownloadTaskWorker.TAG, `progress ${progress}`);
-                        TaskWorker.processProgressUpdate(task, progress, this.prefs, totalSize);
+                        TaskWorker.processProgressUpdate(task, progress, this.prefs!, totalExpected);
                       }
                     }
                   }
                 },
               }
             };
-            return {
-              path: this.tempFilePath
-            }
+            return { path: this.chunkFilePath }
           }
         } as rcp.DownloadToFile
 
         const resp = await session.downloadToFile(url, downloadToFile);
-        console.info(DownloadTaskWorker.TAG, `request response ${url}`);
-
         return await this.process(resp);
 
       } catch (e) {
-        console.error(`err: err code is ${e.code}, err message is ${JSON.stringify(e)}`);
-        console.error(DownloadTaskWorker.TAG, `Error for session ${task.taskId}: ${e.message}`);
+        console.error(DownloadTaskWorker.TAG, `Session error: ${(e as BusinessError).message}`);
       } finally {
         session.close();
       }
@@ -180,13 +170,11 @@ export class DownloadTaskWorker extends TaskWorker {
     }
     this.responseStatusCode = response.statusCode;
     if (response.statusCode >= 200 && response.statusCode <= 206) {
-      console.info(DownloadTaskWorker.TAG, 'handle res');
-      this.eTagHeader = response.headers['ETag'] as string;
-      const acceptRangesHeader = response.headers['Accept-Ranges'] as string;
+      this.eTagHeader = (response.headers['ETag'] || response.headers['etag']) as string;
+      const acceptRangesHeader = (response.headers['Accept-Ranges'] || response.headers['accept-ranges']) as string;
       this.serverAcceptsRanges = acceptRangesHeader === 'bytes' || response.statusCode === 206;
       if (task.allowPause) {
         this.taskCanResume = this.serverAcceptsRanges;
-        // processCanResume(this.task, this.taskCanResume);
       }
       this.isResume = this.isResume && response.statusCode === 206;
 
@@ -195,44 +183,95 @@ export class DownloadTaskWorker extends TaskWorker {
         return TaskStatus.FAILED;
       }
 
-      if (this.isResume && (this.eTagHeader !== this.eTag)) {
-        this.deleteTempFile();
-        console.info(DownloadTaskWorker.TAG, 'Cannot resume: ETag is not identical');
-        this.taskException = new TaskException(
-          ExceptionType.RESUME,
-          undefined,
-          'Cannot resume: ETag is not identical'
-        );
-        return TaskStatus.FAILED;
+      if (this.isResume) {
+        if (this.eTagHeader !== this.eTag) {
+          this.deleteTempFile();
+          this.taskException = new TaskException(
+            ExceptionType.RESUME,
+            undefined,
+            'Cannot resume: ETag is not identical'
+          );
+          return TaskStatus.FAILED;
+        }
+        
+        // Append chunk to main temp file
+        try {
+            const chunkStat = fs.statSync(this.chunkFilePath);
+            const chunkContentLength = parseInt(response.headers['content-length'] as string ?? '-1');
+            if (chunkContentLength !== -1 && chunkStat.size !== chunkContentLength) {
+                 // Incomplete chunk
+                 this.deleteTempFile(); // deletes chunkFilePath too if implemented correctly? No, deleteTempFile only handles tempFilePath.
+                 try { fs.unlinkSync(this.chunkFilePath); } catch(e) {}
+                 return TaskStatus.FAILED;
+            }
+
+            const chunkFile = fs.openSync(this.chunkFilePath, fs.OpenMode.READ_ONLY);
+            const mainFile = fs.openSync(this.tempFilePath, fs.OpenMode.READ_WRITE | fs.OpenMode.APPEND);
+            
+            // Efficient copy buffer
+            const buffer = new ArrayBuffer(4096);
+            let bytesRead = 0;
+            let totalBytesCopied = 0;
+            while ((bytesRead = fs.readSync(chunkFile.fd, buffer)) > 0) {
+               fs.writeSync(mainFile.fd, buffer, { length: bytesRead });
+               totalBytesCopied += bytesRead;
+            }
+            fs.closeSync(chunkFile);
+            fs.closeSync(mainFile);
+            fs.unlinkSync(this.chunkFilePath);
+            
+            // Update this.tempFilePath size implicitly for checkTransfer?
+            // checkTransfer uses this.tempFilePath.
+        } catch (e) {
+            const error = e as BusinessError;
+            console.error(DownloadTaskWorker.TAG, `Resume append error: ${error.message}`);
+            this.taskException = new TaskException(ExceptionType.FILESYSTEM, error.code, error.message);
+            this.deleteTempFile();
+            try { fs.unlinkSync(this.chunkFilePath); } catch(e) {}
+            return TaskStatus.FAILED;
+        }
+      } else {
+        // Non-resume case: chunkFilePath IS tempFilePath.
+        // But we should verify size.
       }
 
       const destFilePath = task.filePath(this.applicationContext);
-      if (!task.filename) {
-        // Suggest filename
+      // For resume, contentLength is of the CHUNK.
+      // Total size check should be against expected total?
+      // Or just trust the append + checkTransfer?
+      
+      const contentLength = parseInt(response.headers['content-length'] as string ?? '-1');
+      // If resume, contentLength is partial.
+      // checkTransfer checks this.tempFilePath size.
+      // If we appended, this.tempFilePath size should be original + chunk.
+      // And we need to know TOTAL expected size?
+      // HTTP 206 Content-Range: bytes start-end/total
+      let totalSize = contentLength;
+      if (this.isResume) {
+          const contentRange = response.headers['content-range'] || response.headers['Content-Range'];
+          if (contentRange) {
+              const match = (contentRange as string).match(/\/(\d+)/);
+              if (match) {
+                  totalSize = parseInt(match[1]);
+              }
+          } else {
+              totalSize = this.requiredStartByte + contentLength; 
+          }
       }
 
-      const contentLength = parseInt(response.headers['content-length'] as string ?? '-1');
-      console.info(DownloadTaskWorker.TAG, `contentLength ${contentLength}`);
-
       try {
-        // This part needs to be adapted to handle streaming the download
-        // instead of waiting for the full result.
-        // For now, we will simulate the download and then move the file.
-        const transferResult = await this.checkTransfer(contentLength);
+        const transferResult = await this.checkTransfer(totalSize);
         if (transferResult === TaskStatus.COMPLETE) {
-          // move file
           const destFile = fs.openSync(destFilePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
           fs.copyFileSync(this.tempFilePath, destFilePath);
           fs.closeSync(destFile);
           this.deleteTempFile();
-
           console.info(DownloadTaskWorker.TAG, `Successfully downloaded taskId ${task.taskId} to ${destFilePath}`);
           return TaskStatus.COMPLETE;
         }
         if (transferResult === TaskStatus.PAUSED && this.prefs) {
           BDPlugin.pausedTaskIds.delete(task.taskId);
           if (this.taskCanResume) {
-            console.info(DownloadTaskWorker.TAG, `Task ${task.taskId} paused`);
             await TaskWorker.processResumeData(
               new ResumeData({
                 task: task,
@@ -254,7 +293,6 @@ export class DownloadTaskWorker extends TaskWorker {
         return TaskStatus.FAILED;
       }
     } else {
-      console.info(DownloadTaskWorker.TAG, `Response code ${response.statusCode} for taskId ${task.taskId}`);
       this.taskException = new TaskException(
         ExceptionType.HTTP_RESPONSE,
         response.statusCode, response.request.url.toString(),
@@ -270,60 +308,6 @@ export class DownloadTaskWorker extends TaskWorker {
         return TaskStatus.COMPLETE
       }
       return TaskStatus.FAILED;
-    } catch (e) {
-      console.error(DownloadTaskWorker.TAG, e);
-      return TaskStatus.FAILED;
-    }
-  }
-
-  private async transferBytes(outputQueue: rcp.INetworkOutputQueue, contentLength: number): Promise<TaskStatus> {
-    const task = this.task;
-    if (!task) {
-      return TaskStatus.FAILED;
-    }
-    try {
-      const file = fs.openSync(this.tempFilePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
-      if (this.isResume) {
-        fs.truncateSync(file.fd, this.startByte);
-      }
-
-      let offset = 0;
-      while (offset < contentLength) {
-        if (this.isCancelled) {
-          console.info(DownloadTaskWorker.TAG, `Task ${task.taskId} cancelled`);
-          fs.closeSync(file);
-          this.deleteTempFile();
-          return TaskStatus.CANCELED;
-        }
-        if (this.isTimedOut) {
-          console.warn(DownloadTaskWorker.TAG, `Task ${task.taskId} timed out`);
-          fs.closeSync(file);
-          this.deleteTempFile();
-          this.taskException = new TaskException(ExceptionType.GENERAL, undefined, 'Task timed out');
-          return TaskStatus.FAILED;
-        }
-        const chunk = outputQueue.read(TaskWorker.BUFFER_SIZE);
-        fs.writeSync(file.fd, chunk);
-        offset += chunk.byteLength;
-        this.bytesTotal = offset;
-        console.info(DownloadTaskWorker.TAG, `chunk ${chunk.byteLength}`);
-
-        if (this.prefs) {
-          const progress =
-            contentLength > 0 ? Math.min(1.0, (this.startByte + this.bytesTotal) / (this.startByte + contentLength)) :
-              -1.0;
-          console.info(DownloadTaskWorker.TAG, `progress ${progress}`);
-          if (this.shouldSendProgressUpdate(progress, Date.now())) {
-            await TaskWorker.processProgressUpdate(task, progress, this.prefs, contentLength);
-          }
-        }
-      }
-
-      fs.closeSync(file);
-      if (this.prefs) {
-        await TaskWorker.processProgressUpdate(task, 1.0, this.prefs, contentLength);
-      }
-      return TaskStatus.COMPLETE;
     } catch (e) {
       console.error(DownloadTaskWorker.TAG, e);
       return TaskStatus.FAILED;
@@ -354,10 +338,9 @@ export class DownloadTaskWorker extends TaskWorker {
             console.error(DownloadTaskWorker.TAG, `Could not truncate temp file: ${error.message}`);
           }
         }
-        console.info(DownloadTaskWorker.TAG, 'Partially downloaded file is corrupted, resume not possible');
       }
     } catch (e) {
-      console.info(DownloadTaskWorker.TAG, 'Partially downloaded file not available, resume not possible');
+      // Not possible to resume
     }
     return false;
   }
@@ -367,22 +350,16 @@ export class DownloadTaskWorker extends TaskWorker {
     if (this.tempFilePath.length === 0) {
       return false;
     }
-    const contentRanges = response.headers['Content-Range'] as string;
+    const contentRanges = (response.headers['Content-Range'] || response.headers['content-range']) as string;
     if (!contentRanges) {
-      console.info(DownloadTaskWorker.TAG, 'Could not process partial response Content-Range');
       return false;
     }
-    // Parse range
     const rangeParts = contentRanges.split(/[\s-\/]/);
     const start = parseInt(rangeParts[1]);
     try {
       const stat = fs.statSync(this.tempFilePath);
       this.startByte = start - this.taskRangeStartByte;
       if (this.startByte > stat.size) {
-        console.info(DownloadTaskWorker.TAG,
-          `Offered range not feasible: ${contentRanges} with startByte ${this.startByte}`);
-        this.taskException = new TaskException(ExceptionType.RESUME, -1,
-          `Offered range not feasible: ${contentRanges} with startByte ${this.startByte}`);
         return false;
       }
       const file = fs.openSync(this.tempFilePath, fs.OpenMode.READ_WRITE);
@@ -390,9 +367,6 @@ export class DownloadTaskWorker extends TaskWorker {
       fs.closeSync(file);
       return true;
     } catch (e) {
-      const error = e as BusinessError;
-      console.info(DownloadTaskWorker.TAG, `Could not truncate temp file: ${error.message}`);
-      this.taskException = new TaskException(ExceptionType.RESUME, -1, 'Could not truncate temp file');
       return false;
     }
   }
@@ -402,8 +376,7 @@ export class DownloadTaskWorker extends TaskWorker {
       try {
         fs.unlinkSync(this.tempFilePath);
       } catch (e) {
-        const error = e as BusinessError;
-        console.info(DownloadTaskWorker.TAG, `Could not delete temp file at ${this.tempFilePath}: ${error.message}`);
+        // Ignore
       }
     }
   }

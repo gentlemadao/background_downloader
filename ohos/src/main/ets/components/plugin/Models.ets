@@ -121,6 +121,10 @@ export interface TaskParams {
   group?: string;
   updates?: Updates;
   requiresWiFi?: boolean;
+  requiresCharging?: boolean;
+  requiresBatteryNotLow?: boolean;
+  requiresStorageNotLow?: boolean;
+  requiresDeviceIdle?: boolean;
   retries?: number;
   retriesRemaining?: number;
   allowPause?: boolean;
@@ -130,6 +134,13 @@ export interface TaskParams {
   creationTime?: number;
   options?: TaskOptions;
   taskType?: string;
+}
+
+export enum SharedStorageDestination {
+  DOWNLOADS,
+  PHOTOS,
+  GALLERY,
+  EXTERNAL
 }
 
 @Sendable
@@ -150,6 +161,10 @@ export class Task {
   readonly group: string;
   readonly updates: Updates;
   readonly requiresWiFi: boolean;
+  readonly requiresCharging: boolean;
+  readonly requiresBatteryNotLow: boolean;
+  readonly requiresStorageNotLow: boolean;
+  readonly requiresDeviceIdle: boolean;
   readonly retries: number;
   readonly retriesRemaining: number;
   readonly allowPause: boolean;
@@ -208,6 +223,10 @@ export class Task {
       ].find(e => e.value === obj.updates);
     }
     params.requiresWiFi = obj.requiresWiFi;
+    params.requiresCharging = obj.requiresCharging;
+    params.requiresBatteryNotLow = obj.requiresBatteryNotLow;
+    params.requiresStorageNotLow = obj.requiresStorageNotLow;
+    params.requiresDeviceIdle = obj.requiresDeviceIdle;
     params.retries = obj.retries;
     params.retriesRemaining = obj.retriesRemaining;
     params.allowPause = obj.allowPause;
@@ -246,6 +265,10 @@ export class Task {
     this.group = init.group ?? '';
     this.updates = init.updates ?? Updates.NONE;
     this.requiresWiFi = init.requiresWiFi ?? false;
+    this.requiresCharging = init.requiresCharging ?? false;
+    this.requiresBatteryNotLow = init.requiresBatteryNotLow ?? false;
+    this.requiresStorageNotLow = init.requiresStorageNotLow ?? false;
+    this.requiresDeviceIdle = init.requiresDeviceIdle ?? false;
     this.retries = init.retries ?? 0;
     this.retriesRemaining = init.retriesRemaining ?? 0;
     this.allowPause = init.allowPause ?? false;
@@ -385,6 +408,54 @@ export class RequireWiFi {
 
   toJSON() {
     return this.value;
+  }
+}
+
+@Sendable
+export class Chunk {
+  taskId: string;
+  url: string;
+  filename: string;
+  path: string;
+  chunkStart: number;
+  chunkEnd: number;
+  progress: number = 0;
+  status: TaskStatus = TaskStatus.ENQUEUED;
+
+  constructor(taskId: string, url: string, filename: string, path: string, chunkStart: number, chunkEnd: number) {
+    this.taskId = taskId;
+    this.url = url;
+    this.filename = filename;
+    this.path = path;
+    this.chunkStart = chunkStart;
+    this.chunkEnd = chunkEnd;
+  }
+
+  static fromObject(obj: ESObject): Chunk {
+    const chunk = new Chunk(
+      obj.taskId as string,
+      obj.url as string,
+      obj.filename as string,
+      obj.path as string,
+      obj.chunkStart as number,
+      obj.chunkEnd as number
+    );
+    chunk.progress = obj.progress as number;
+    chunk.status = TaskStatus.from(obj.status as number);
+    return chunk;
+  }
+
+  toJson(): string {
+    return JSON.stringify({
+      taskId: this.taskId,
+      url: this.url,
+      filename: this.filename,
+      path: this.path,
+      chunkStart: this.chunkStart,
+      chunkEnd: this.chunkEnd,
+      progress: this.progress,
+      status: this.status.value
+    });
   }
 }
 

@@ -18,8 +18,10 @@ import { WiFi } from './WIFI';
 import { BackgroundPost, PostArg, QueueService } from './QueueService';
 import { BusinessError, systemDateTime } from '@kit.BasicServicesKit';
 import { Want } from '@kit.AbilityKit';
+import { TaskDatabase } from './TaskDatabase';
 import { collections } from '@kit.ArkTS';
 import { preferences } from '@kit.ArkData';
+import { rcp } from '@kit.RemoteCommunicationKit';
 
 // Define explicit type for task key-value pairs
 type TaskKeyValuePair = [string, Task];
@@ -66,13 +68,18 @@ export class TaskWorker {
   runInForeground = false;
   protected hasDeliveredResult = false;
   protected isCancelled = false;
+  public isPaused = false;
 
   get isActive(): boolean {
-    return !this.hasDeliveredResult && !this.isCancelled;
+    return !this.hasDeliveredResult && !this.isCancelled && !this.isPaused;
   }
 
   public cancel(): void {
     this.isCancelled = true;
+  }
+
+  public pause(): void {
+    this.isPaused = true;
   }
 
   prefs?: preferences.Preferences
@@ -82,6 +89,48 @@ export class TaskWorker {
   constructor(applicationContext: common.UIAbilityContext, want: Want) {
     this.applicationContext = applicationContext
     this.want = want
+  }
+
+  /**
+   * Creates an rcp.Session with global configuration (Proxy, SSL) applied from preferences.
+   * Merges with the provided baseConfig if any.
+   */
+  public static async createSession(prefs: preferences.Preferences, baseConfig?: rcp.SessionConfiguration): Promise<rcp.Session> {
+    const config: rcp.SessionConfiguration = baseConfig ?? {};
+
+    if (!config.requestConfiguration) {
+      config.requestConfiguration = {};
+    }
+    if (!config.requestConfiguration.security) {
+      config.requestConfiguration.security = {
+        remoteValidation: 'system'
+      };
+    }
+
+    // 1. Proxy Configuration
+    const proxyAddress = await prefs.get(BDPlugin.KEY_CONFIG_PROXY_ADDRESS, '') as string;
+    const proxyPort = await prefs.get(BDPlugin.KEY_CONFIG_PROXY_PORT, -1) as number;
+
+    if (proxyAddress && proxyAddress.length > 0 && proxyPort > 0) {
+      // TODO: Verify rcp.ProxyConfiguration signature for this SDK version.
+      // Current attempt { host, port } fails with "host does not exist in type WebProxy".
+      /*
+      config.requestConfiguration.proxy = {
+        host: proxyAddress,
+        port: proxyPort,
+        exclusions: [] 
+      };
+      */
+      console.warn(TaskWorker.TAG, "Proxy configuration is currently disabled due to SDK type mismatch.");
+    }
+
+    // 2. SSL Bypass Configuration
+    const bypassSSL = await prefs.get(BDPlugin.KEY_CONFIG_BYPASS_SSL, false) as boolean;
+    if (bypassSSL) {
+      config.requestConfiguration.security.remoteValidation = 'skip';
+    }
+
+    return rcp.createSession(config);
   }
 
   public async doWork(): Promise<void> {
@@ -167,6 +216,12 @@ export class TaskWorker {
     charSet?: string,
     context?: common.UIAbilityContext,
   ) {
+    if (context) {
+      const db = new TaskDatabase(context);
+      const progress = status.equals(TaskStatus.COMPLETE) ? 1.0 : (status.equals(TaskStatus.ENQUEUED) ? 0.0 : undefined);
+      db.insertOrUpdateTask(task, status, progress);
+    }
+
     // Intercept status updates resulting from re-enqueue request, which
     // themselves are triggered by a change in WiFi requirement
     if (BDPlugin.tasksToReEnqueue.delete(task)) {

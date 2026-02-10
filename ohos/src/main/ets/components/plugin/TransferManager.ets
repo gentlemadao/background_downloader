@@ -1,11 +1,14 @@
-import { Task } from './Models';
+import { Task, TaskStatus } from './Models';
 import { DownloadTaskWorker } from './DownloadTaskWorker';
 import { UploadTaskWorker } from './UploadTaskWorker';
 import { ParallelDownloadTaskWorker } from './ParallelDownloadTaskWorker';
+import { DataTaskWorker } from './DataTaskWorker';
 import { common } from '@kit.AbilityKit';
 import { Want } from '@kit.AbilityKit';
 import { TaskWorker } from './TaskWorker';
 import BDPlugin from './BDPlugin';
+import { Constraints } from './Constraints';
+import { preferences } from '@kit.ArkData';
 
 const TAG = "TransferManager";
 
@@ -31,11 +34,27 @@ class TransferManager {
       return;
     }
 
+    if (!(await Constraints.meetsConstraints(task, this.context))) {
+      console.info(TAG, `Task ${task.taskId} constraints not met.`);
+      const options: preferences.Options = { name: 'DEFAULT' };
+      const prefs = await preferences.getPreferences(this.context, options);
+      await TaskWorker.processStatusUpdate(
+        task,
+        TaskStatus.WAITING_TO_RETRY,
+        prefs,
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        this.context
+      );
+      return;
+    }
+
     let worker: TaskWorker;
     if (task.isParallelDownloadTask()) {
       worker = new ParallelDownloadTaskWorker(this.context, want);
     } else if (task.isUploadTask()) {
       worker = new UploadTaskWorker(this.context, want);
+    } else if (task.isDataTask()) {
+      worker = new DataTaskWorker(this.context, want);
     } else {
       worker = new DownloadTaskWorker(this.context, want);
     }
@@ -68,6 +87,20 @@ class TransferManager {
     } else {
       console.warn(TAG, `Could not find active task with id ${taskId} to cancel.`);
     }
+  }
+
+  public pauseTaskById(taskId: string): void {
+    const worker = this.activeTasks.get(taskId);
+    if (worker) {
+      console.info(TAG, `Pausing task with id ${taskId}`);
+      worker.pause();
+    } else {
+      console.warn(TAG, `Could not find active task with id ${taskId} to pause.`);
+    }
+  }
+
+  public isPaused(taskId: string): boolean {
+    return this.activeTasks.get(taskId)?.isPaused ?? false;
   }
 
   public getTaskById(taskId: string): Task | undefined {

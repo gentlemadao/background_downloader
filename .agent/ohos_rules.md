@@ -1,141 +1,66 @@
-# OpenHarmony (ohos) Development Rules
+# OpenHarmony (ArkTS/OHOS) 开发规范与最佳实践
 
-## 1. Context & Tech Stack
-- **Platform:** OpenHarmony (API 11+ / HarmonyOS NEXT).
-- **Language:** ArkTS (TypeScript tailored for OpenHarmony).
-- **Integration:** Flutter Plugin development (`@ohos/flutter_ohos`).
-- **Scope:** These rules apply to both the plugin code in `ohos/` and the example app in `example/ohos/`.
-- **Imports:** Use the modern Modular Imports (`@kit.*`) style (e.g., `@kit.AbilityKit`, `@kit.ArkTS`).
+## 1. 核心上下文与技术栈
+- **平台:** OpenHarmony (API 11+ / HarmonyOS NEXT).
+- **语言:** ArkTS (基于 TypeScript 的定制语言，强制执行严格模式).
+- **集成:** Flutter Plugin 插件开发 (`@ohos/flutter_ohos`).
+- **范围:** 适用于 `ohos/` 插件目录及 `example/ohos/` 示例工程。
 
-## 2. Code Style & Conventions
-- **Naming:** Use `PascalCase` for classes/components, `camelCase` for methods/variables, and `UPPER_SNAKE_CASE` for constants.
-- **Typing:** Strict typing is required. Avoid `any`. Use explicit interfaces for JSON parsing/serialization.
-- **Async/Await:** Prefer `async/await` over raw Promises for readability.
-- **Null Safety:** Use strict null checks. Handle `undefined` and `null` explicitly using optional chaining (`?.`) or nullish coalescing (`??`).
-- **Strict Equality:** Always use `===` and `!==` instead of `==` and `!=`.
-- **Logging:** 
-  - **FORBIDDEN:** `console.log` (lacks log level and categorization).
-  - **REQUIRED:** Use `console.info`, `console.warn`, or `console.error`.
-  - **TAG:** Always include a consistent `TAG` as the first argument.
-  - *Example:* `console.info(TAG, "Task started");`
+## 2. ArkTS 严格模式与类型系统 (API 11+)
 
-## 3. Flutter Plugin Architecture
-Implement the standard interfaces from `@ohos/flutter_ohos`:
-- **`FlutterPlugin`:** For plugin lifecycle (`onAttachedToEngine`, `onDetachedFromEngine`).
-- **`MethodCallHandler`:** For handling method channel calls (`onMethodCall`).
-- **`AbilityAware`:** For access to `UIAbilityContext` (`onAttachedToAbility`, `onDetachedFromAbility`).
+### 类型定义与安全
+- **禁止使用 `any` 和 `unknown`**：必须使用明确的类型声明。对于 JSON 或动态数据，优先使用 `ESObject` 或 `Record<string, ESObject>`。
+- **强制类型断言**：在处理来自 `Want` 或外部对象的属性时，必须转换（如 `as ESObject`）。
+- **禁止无类型的对象字面量 (arkts-no-untyped-obj-literals)**：
+  - *错误示范*：`const config: ESObject = { transfer: { timeout: 1000 } };`（嵌套的字面量未对应显式类/接口）。
+  - *正确示范*：分别定义各级接口对象，如 `const transfer: rcp.TransferConfiguration = { timeout: { ... } };`，再组合。
+- **Definite Assignment Assertion (`!`) 限制**：尽量通过构造函数初始化。在 `.ets` 文件中，必须初始化的属性若不能立即赋值，需考虑可空类型。
+- **静态布局**：禁止动态向对象添加/删除属性。所有属性必须在类或接口中声明。
 
-### Example Structure
-```typescript
-import { 
-  FlutterPlugin, 
-  FlutterPluginBinding, 
-  MethodCall, 
-  MethodCallHandler, 
-  MethodChannel,
-  MethodResult,
-  AbilityAware,
-  AbilityPluginBinding
-} from "@ohos/flutter_ohos";
-import { common } from "@kit.AbilityKit";
+### Concurrency & Sendable
+- **Sendable 约束**：
+  - 标记为 `@Sendable` 的类，其所有属性必须是基础类型、`collections.Map`、`collections.Array` 或其他 `@Sendable` 类。
+  - **枚举 (Enum)** 不支持 `@Sendable` 装饰器，但枚举值本身可以安全地在多线程任务间传递。
 
-export default class MyPlugin implements FlutterPlugin, MethodCallHandler, AbilityAware {
-  private channel?: MethodChannel;
-  private context?: common.UIAbilityContext;
+## 3. Flutter 插件架构 (ArkTS 实现)
 
-  onAttachedToEngine(binding: FlutterPluginBinding): void {
-    this.channel = new MethodChannel(binding.getBinaryMessenger(), "com.example/channel_name");
-    this.channel.setMethodCallHandler(this);
-  }
+### 核心接口
+实现自 `@ohos/flutter_ohos` 的标准接口：
+- **`FlutterPlugin`**: 处理生命周期 (`onAttachedToEngine`, `onDetachedFromEngine`)。
+- **`MethodCallHandler`**: 处理 MethodChannel 调用。
+- **`AbilityAware`**: 获取 `UIAbilityContext`（必须在 `onAttachedToAbility` 中保存 context）。
 
-  onDetachedFromEngine(binding: FlutterPluginBinding): void {
-    this.channel?.setMethodCallHandler(null);
-    this.channel = undefined;
-  }
+### 常用导入 (Modular Imports)
+- **REQUIRED:** 使用 `@kit.*` 模块化导入风格。
+  - `@kit.AbilityKit` (含 `Want`, `common`)
+  - `@kit.ArkTS` (含 `util`, `taskpool`)
+  - `@kit.ArkData` (含 `preferences`)
+  - `@kit.CoreFileKit` (含 `fileIo as fs`)
+  - `@kit.RemoteCommunicationKit` (含 `rcp`)
 
-  onAttachedToAbility(binding: AbilityPluginBinding): void {
-    this.context = binding.getAbility().context;
-  }
+## 4. 网络通信 (RCP Kit) 最佳实践
 
-  onDetachedFromAbility(): void {
-    this.context = undefined;
-  }
+- **超时配置**：优先在 `request.configuration.transfer.timeout` 中设置，利用显式的 `TransferConfiguration` 接口避免字面量类型错误。
+- **Session 管理**：`rcp.createSession()` 后的 session 使用完必须调用 `session.close()`。
+- **代理与安全**：由于 RCP 版本差异，若 `HttpProxy` 或 `remoteVerification` 属性在当前 SDK 不可见，可使用 `ESObject` 强制映射或暂时通过扁平化配置规避。
 
-  onMethodCall(call: MethodCall, result: MethodResult): void {
-    // Handle methods
-  }
-}
-```
+## 5. 日志与调试规范
 
-## 4. Specific OHOS Capabilities
+- **禁止 `console.log`**：无法进行日志分级和类别过滤。
+- **必须使用 `console.info`, `console.warn`, `console.error`**。
+- **TAG 规范**：第一个参数必须是类名或模块名定义的 `TAG` 字符串。
+  - `console.info(TAG, "Task started");`
 
-### Imports (Modernization)
-- **FORBIDDEN:** Legacy `@ohos.*` imports.
-- **REQUIRED:** Modern `@kit.*` imports.
-  - `@ohos.file.fs` -> `@kit.CoreFileKit` (import `{ fileIo as fs }`)
-  - `@ohos.app.ability.Want` -> `@kit.AbilityKit` (import `{ Want }`)
-  - `@ohos.data.preferences` -> `@kit.ArkData` (import `{ preferences }`)
-  - `@ohos.util` -> `@kit.ArkTS` (import `{ util }`)
+## 6. 系统交互与权限
 
-### Data Persistence
-- Use `@kit.ArkData.preferences` for key-value storage.
-- **CRITICAL:** Use `ArkTSUtils.locks.AsyncLock` when accessing Preferences from multiple threads or async contexts to prevent data races.
+- **打开文件**：使用 `context.startAbility` 发送 `Want`（Action: `ohos.want.action.viewData`）。URI 必须通过 `fileUri.getUriFromPath` 生成。
+- **相册存储**：使用 `@kit.MediaLibraryKit` 的 `photoAccessHelper`，需申请 `ohos.permission.WRITE_IMAGEVIDEO` 权限。
+- **持久化**：使用 `preferences` 存储配置。异步访问建议配合 `ArkTSUtils.locks.AsyncLock` 防止竞争。
 
-### Concurrency
-- Use `@kit.ArkTS.taskpool` for CPU-intensive tasks.
-- Avoid blocking the main UI thread.
-
-### Logging
-- Use standard `console` with a consistent `TAG`.
-- Example: `console.info(TAG, "Message");`, `console.error(TAG, "Error: " + error);`
-
-## 5. Common Pitfalls to Avoid
-1.  **Context Loss:** Always check if `this.context` (UIAbilityContext) is valid before using it. Return a clear error code (e.g., `NO_CONTEXT`) to Flutter if it's missing.
-2.  **MethodResult Handling:** Ensure `result.success()`, `result.error()`, or `result.notImplemented()` is called **exactly once** for every method call.
-3.  **JSON Marshaling:** When passing complex objects between Flutter and OHOS, prefer passing JSON strings and parsing them in ArkTS to ensure type safety on both ends.
-
-## 6. Directory Structure
-- **`src/main/ets/components/plugin/`**: Logic files.
-- **`oh-package.json5`**: Dependencies.
-- **`build-profile.json5`**: Build configuration.
-
-## 7. ArkTS (.ets) vs TypeScript (.ts)
-- **File Extensions:**
-  - **`.ets` (ArkTS):** The primary file type for OpenHarmony/HarmonyOS applications. It supports the ArkUI declarative syntax (e.g., `struct`, `@Component`, `build()`) and enforces "ArkTS Strict" rules. **Use `.ets` for all source code in `src/main/ets`**, including logic-only classes.
-  - **`.ts` (TypeScript):** Typically used for build scripts (e.g., `hvigorfile.ts`) or legacy logic.
-
-- **ArkTS Strictness (applied in `.ets`):**
-  - **No `any`:** The `any` type is strictly prohibited. Use explicit types, generics, or `Object` (if absolutely necessary and safe).
-  - **Static Layout:** Objects cannot be modified dynamically at runtime. You cannot add or remove properties from an object after it is created. All properties must be declared in the class or interface.
-    ```typescript
-    // BAD (Valid TS, Invalid ArkTS)
-    let obj = {};
-    obj.name = "Test"; 
-    
-    // GOOD
-    class MyObj {
-      name: string = "";
-    }
-    let obj = new MyObj();
-    obj.name = "Test";
-    ```
-  - **Structural Typing:** ArkTS relies more on nominal typing for classes compared to TypeScript's structural typing.
-
-- **UI Syntax (ArkUI in `.ets`):**
-  - **Structs:** UI components are defined as `struct`, not `class`.
-  - **Decorators:** Extensive use of decorators for state management:
-    - `@State`: Component-internal mutable state.
-    - `@Prop`: One-way sync from parent.
-    - `@Link`: Two-way sync with parent.
-    - `@Builder`: For declarative UI construction functions.
-
-## 8. Verification Workflow (Mandatory)
-After every code modification in the `ohos/` directory, you **MUST** verify the build to ensure no ArkTS/TS errors were introduced.
-
-**Verification Command (Run from 'example/ohos/' directory):**
+## 7. 验证工作流 (Mandatory)
+每次修改代码后，**必须**在 `example/ohos/` 目录下运行以下命令进行全量编译和 ArkTS 静态分析：
 
 ```bash
 $TOOL_HOME/tools/node/bin/node $TOOL_HOME/tools/hvigor/bin/hvigorw.js --mode module -p product=default -p module=entry @default assembleHap --analyze=normal --parallel --incremental --daemon
 ```
-
-*Note: This command performs full compilation and ArkTS static analysis. A "BUILD SUCCESSFUL" result ensures the code adheres to strict HarmonyOS NEXT requirements.*
+*只有看到 "BUILD SUCCESSFUL" 才意味着代码符合 HarmonyOS NEXT 的上架/运行要求。*
